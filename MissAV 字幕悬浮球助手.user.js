@@ -2,7 +2,7 @@
 // @name         MissAV 字幕悬浮球助手
 // @name:zh-CN   MissAV 字幕悬浮球助手
 // @namespace    https://greasyfork.org/scripts/missav-subtitle-ball
-// @version      1.5.0
+// @version      1.4.0
 // @description  Add subtitle loading, appearance controls, online search, hotkeys, and a draggable floating-ball panel for MissAV and Jable. Added subtitle viewer auto-scroll feature.
 // @description:zh-CN 为 MissAV 与 Jable 提供本地字幕加载、字幕样式调节、在线字幕搜索、快捷键控制与可拖拽字幕悬浮球面板，字幕预览窗口支持跟随播放进度滚动。
 // @author       时光Alex
@@ -14,6 +14,7 @@
 // @match        *://jable.tv/*
 // @match        *://hanime1.me/*
 // @match        *://www.jable.tv/*
+// @match        *://highporn.net/*
 // @noframes
 // @grant        GM.xmlHttpRequest
 // @grant        GM.openInTab
@@ -62,6 +63,7 @@
         '[class*="video-player"]',
         '[class*="player"]'
     ];
+    
 
     // --- Styles ---
     addStyle(`
@@ -1706,6 +1708,7 @@
             updateSubtitle();
             refreshSubtitleViewer();
             showToast('在线字幕加载成功');
+            viewSubtitleContent();// 加载完成后自动打开预览窗口
         } catch (error) {
             console.error("Error loading remote subtitle:", error);
             showToast(`在线字幕加载失败: ${error.message}`);
