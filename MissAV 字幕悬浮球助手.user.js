@@ -15,6 +15,7 @@
 // @match        *://hanime1.me/*
 // @match        *://www.jable.tv/*
 // @match        *://highporn.net/*
+// @match        *://www.tnaflix.com/*
 // @noframes
 // @grant        GM.xmlHttpRequest
 // @grant        GM.openInTab
@@ -1395,6 +1396,7 @@
             refreshSubtitleViewer();
             if (subtitleList) closeSubtitleList();
             showToast('本地字幕加载成功');
+            viewSubtitleContent();// 加载完成后自动打开预览窗口
         } catch (error) {
             console.error("Subtitle load error:", error);
             showToast(`本地字幕加载失败: ${error.message}`);
@@ -1542,14 +1544,29 @@
         });
     }
 
-    function searchSubtitleOnline1() {
-        let videoID = getCurrentVideoID();
-        if (location.hostname.includes('hanime1.me')) {
+    function searchSubtitleDomainRule(vid){
+        let videoID = vid || ""
+        // 需要手动输入搜索关键字的域名列表
+        const manualInputDomains = [
+            'hanime1.me',
+            'tnaflix.com'
+        ];
+        // 循环判断是否匹配任一域名
+        const needManualInput = manualInputDomains.some(domain => 
+            location.hostname.includes(domain)
+        );
+        if (needManualInput) {
             const defaultVal = videoID || "";
             const input = prompt("请输入要搜索的关键字 (Subtitlecat):", defaultVal);
             if (input === null) return;
             videoID = input.trim();
         }
+        return videoID;
+    }
+
+    function searchSubtitleOnline1() {
+        let videoID = getCurrentVideoID();
+        videoID = searchSubtitleDomainRule(videoID);
 
         if (!videoID) {
             showToast('无法获取当前视频番号');
@@ -1562,12 +1579,7 @@
 
     async function searchSubtitleOnline2() {
         let videoID = getCurrentVideoID();
-        if (location.hostname.includes('hanime1.me')) {
-            const defaultVal = videoID || "";
-            const input = prompt("请输入要搜索的关键字 (在线搜索):", defaultVal);
-            if (input === null) return;
-            videoID = input.trim();
-        }
+        videoID = searchSubtitleDomainRule(videoID);
 
         if (!videoID) {
             showToast('无法获取当前视频番号');

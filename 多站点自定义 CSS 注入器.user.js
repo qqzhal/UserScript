@@ -14,11 +14,11 @@
 
     const SITE_CONFIGS = [
         {
-            name: "微博 - 悄悄关注",
-            rule: "weibo.com/mygroups?gid=100052107841192",
+            name: "微博",
+            rule: "weibo.com",// weibo.com/mygroups?gid=100052107841192
             css: `
-                footer .woo-box-flex .woo-box-item-flex .woo-box-flex .woo-box-item-flex:nth-child(1),
-                footer .woo-box-flex .woo-box-item-flex .woo-box-flex .woo-box-item-flex:nth-child(3) { display: none !important; }
+                footer .woo-box-flex .woo-box-item-flex .woo-box-flex .woo-box-item-flex:nth-last-child(1),
+                footer .woo-box-flex .woo-box-item-flex .woo-box-flex .woo-box-item-flex:nth-last-child(3) {display: none !important;}
                 header .woo-box-flex .woo-button-main[class*="_followbtn"] { display: none !important; }
                 header .woo-box-flex .woo-font--angleDown[class*="_action"] { display: none !important; }
                 .popcard[class*="_popcard"] { display: none !important; }
@@ -29,6 +29,20 @@
             rule: "zhihu.com",
             css: `.WriteArea { display: none !important; }`,
         },
+        {
+            name: "B站 - 基础样式",
+            rule: "bilibili.com",
+            css: `.adblock-tips { display: none !important; }`,
+        },
+        {
+            name: "X - 基础样式",
+            rule: "x.com",
+            css: `
+				div[data-testid="tweetPhoto"] img {
+				    opacity:1;
+				}
+            `,
+        },
     ];
 
     // --- 核心逻辑：带防抖的注入 ---
@@ -38,7 +52,7 @@
     function init() {
         // 防抖：200ms 内无论触发多少次，只执行最后一次
         if (timer) clearTimeout(timer);
-        
+
         timer = setTimeout(() => {
             const currentUrl = window.location.href;
             SITE_CONFIGS.forEach((config) => {
@@ -51,7 +65,7 @@
                     console.log(`%c[CSS Injector] 注入成功: ${config.name}`, "color: white; background: #1a73e8; padding: 2px 5px;");
                 }
             });
-        }, 200); 
+        }, 200);
     }
 
     // 1. 立即执行
