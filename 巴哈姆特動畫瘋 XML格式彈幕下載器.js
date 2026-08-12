@@ -310,6 +310,16 @@ var startDownload = function(data, filename) {
 var generateXML = function(danmaku, info) {
     var xml = '<?xml version="1.0" encoding="UTF-8"?>\n<i>\n';
     
+    // 转义 XML 特殊字符
+    var escapeXml = function(str) {
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&apos;");
+    };
+
     // 排序弹幕
     danmaku.sort(function(a, b) {
         return a.time - b.time;
@@ -335,15 +345,13 @@ var generateXML = function(danmaku, info) {
 
         var pAttr = [time, mode, size, color, timestamp, pool, userHash, rowId].join(',');
         
-        // 转义 XML 特殊字符
-        var content = line.text
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&apos;");
+        var content = escapeXml(line.text);
 
-        xml += '    <d p="' + pAttr + '">' + content + '</d>\n';
+        // 兼容 B 站 / 录播姬 XML 格式：带上 user 属性（巴哈姆特账号 ID），
+        // 本地播放脚本（如 Bilibili本地弹幕.js）可据此显示发送者
+        var userAttr = line.sender ? ' user="' + escapeXml(line.sender) + '"' : '';
+
+        xml += '    <d p="' + pAttr + '"' + userAttr + '>' + content + '</d>\n';
     });
 
     xml += '</i>';

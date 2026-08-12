@@ -10,6 +10,8 @@
 // @match        *://www.bilibili.com/bangumi/*
 // @icon         https://www.bilibili.com/favicon.ico
 // @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @license      MIT
 // @run-at       document-idle
 // ==/UserScript==
@@ -39,12 +41,132 @@
     const MAX_SCALE = 2.5;
     const MAX_PREVIEW_LINES = 10;
     const PREVIEW_WINDOW_SECONDS = 1.0;
+    // 弹幕滚动时长（秒）：合并弹幕按条数对数加成，跑得更慢、停留更久，可自行微调
+    const DM_SCROLL_DURATION = 8.0;
+    const DM_MERGE_DURATION_BONUS = 6.0;
 
     const DM_OFFSET_KEY = 'ldx-offset';
     const OFFSET_MEMORY_LIMIT = 5.0; // 偏移记忆阈值（秒）：绝对值在此范围内才跨视频沿用，超过则加载时重置为 0，可自行微调
     let savedOffsetInit = parseFloat(localStorage.getItem(DM_OFFSET_KEY));
     let fineTuneOffset = (!isNaN(savedOffsetInit) && Math.abs(savedOffsetInit) < OFFSET_MEMORY_LIMIT) ? savedOffsetInit : 0.0;
     let globalTimeOffset = fineTuneOffset;
+
+    // ==================== 历史弹幕文件（最近 5 个，同文件去重） ====================
+    const FILE_HISTORY_KEY = 'ldx-file-history';
+    const FILE_HISTORY_MAX = 5;
+    const FILE_HISTORY_MAX_SIZE = 1000 * 1024; // 单文件内容超过此大小（约 1000 KB）不记录，避免撑爆 localStorage，可自行微调
+    let historyMenu = null;
+    let historyBtn = null;
+
+    // 优先使用油猴脚本自有的存储空间（GM_setValue），不占用网站 localStorage
+    function historySave(list) {
+        const json = JSON.stringify(list);
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(FILE_HISTORY_KEY, json);
+                return;
+            }
+        } catch (e) {}
+        try { localStorage.setItem(FILE_HISTORY_KEY, json); } catch (e) {}
+    }
+
+    function historyLoad() {
+        let list = [];
+        try {
+            if (typeof GM_getValue === 'function') {
+                const v = GM_getValue(FILE_HISTORY_KEY, '');
+                if (v) list = JSON.parse(v);
+            }
+        } catch (e) {}
+        if (list.length) return list;
+        // 迁移旧版存于网站 localStorage 的历史记录
+        try {
+            const old = JSON.parse(localStorage.getItem(FILE_HISTORY_KEY) || '[]');
+            if (old.length) {
+                localStorage.removeItem(FILE_HISTORY_KEY);
+                historySave(old);
+                return old;
+            }
+        } catch (e) {}
+        return [];
+    }
+
+    let fileHistory = historyLoad();
+    let currentHistoryName = null; // 当前加载的文件名，用于同步配对偏移
+    let historySaveTimer = null;
+
+    // 调节偏移后延迟保存历史（避免滑块拖动时频繁序列化大文件内容）
+    function scheduleHistorySave() {
+        clearTimeout(historySaveTimer);
+        historySaveTimer = setTimeout(() => {
+            saveHistoryWithFallback();
+        }, 500);
+    }
+
+    // 清洗录播姬文件名：录制-271628-20260804-195010-589-矿世奇才.xml -> 20260804-195010-矿世奇才.xml
+    function cleanFileName(name) {
+        let cleaned = name.replace(/^录制-\d+-/, '');
+        cleaned = cleaned.replace(/^(\d{8}-\d{6})-\d+-/, '$1-');
+        return cleaned;
+    }
+
+    // 返回 true 表示写入成功；localStorage 超限时返回 false 供调用方降级
+    function saveHistoryWithFallback() {
+        const json = JSON.stringify(fileHistory);
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(FILE_HISTORY_KEY, json);
+                return true; // GM 存储空间大，通常静默成功
+            }
+        } catch (e) {}
+        try {
+            localStorage.setItem(FILE_HISTORY_KEY, json);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function addToHistory(fileName, content, offset) {
+        if (!fileName || content.length > FILE_HISTORY_MAX_SIZE) return;
+        fileHistory = fileHistory.filter(h => h.name !== fileName);
+        fileHistory.unshift({
+            name: fileName,
+            display: cleanFileName(fileName),
+            content: content,
+            time: Date.now(),
+            offset: offset
+        });
+        if (fileHistory.length > FILE_HISTORY_MAX) fileHistory.length = FILE_HISTORY_MAX;
+        if (!saveHistoryWithFallback()) {
+            // localStorage 空间不足：从最旧的一条开始丢弃
+            while (fileHistory.length > 1) {
+                fileHistory.pop();
+                if (saveHistoryWithFallback()) break;
+            }
+        }
+        updateHistoryMenu();
+    }
+
+    function updateHistoryMenu() {
+        if (!historyMenu) return;
+        historyMenu.innerHTML = '';
+        if (!fileHistory.length) {
+            historyMenu.innerHTML = '<div class="ldx-history-item ldx-history-empty">暂无历史文件</div>';
+            return;
+        }
+        fileHistory.forEach(h => {
+            const item = document.createElement('div');
+            item.className = 'ldx-history-item';
+            item.textContent = h.display || h.name;
+            item.title = h.name;
+            item.addEventListener('click', () => {
+                historyMenu.classList.remove('open');
+                loadXmlFromData(h.name, h.content, h.offset);
+            });
+            historyMenu.appendChild(item);
+        });
+    }
 
     const MIN_FT_OFFSET = -60.0;
     const MAX_FT_OFFSET = 60.0;
@@ -140,7 +262,7 @@
         /* ---------- 主容器 ---------- */
         #ldx-container {
             position: fixed;
-            top: 60px;
+            top: 70px;
             left: -320px;
             width: 320px;
             z-index: 10;
@@ -250,6 +372,62 @@
             border-color: rgba(123, 227, 162, 0.35);
             background: rgba(46, 160, 91, 0.18);
         }
+        .ldx-history-wrap {
+            position: relative;
+            margin-left: 6px;
+            flex-shrink: 0;
+        }
+        .ldx-history-btn {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.09);
+            color: #9aa0b5;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: inherit;
+            padding: 3px 9px;
+            border-radius: 999px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+        .ldx-history-btn:hover {
+            color: #fff;
+            background: rgba(251, 114, 153, 0.2);
+            border-color: rgba(251, 114, 153, 0.45);
+        }
+        .ldx-history-menu {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 6px);
+            width: 260px;
+            background: linear-gradient(160deg, rgba(30, 32, 42, 0.97), rgba(16, 18, 26, 0.98));
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+            display: none;
+            z-index: 30;
+            overflow: hidden;
+        }
+        .ldx-history-menu.open { display: block; }
+        .ldx-history-item {
+            padding: 8px 11px;
+            font-size: 12px;
+            color: #cdd1e0;
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            transition: background 0.15s;
+        }
+        .ldx-history-item:last-child { border-bottom: none; }
+        .ldx-history-item:hover { background: rgba(251, 114, 153, 0.16); color: #fff; }
+        .ldx-history-item.ldx-history-empty {
+            cursor: default;
+            color: #8a8fa3;
+            text-align: center;
+        }
+        .ldx-history-item.ldx-history-empty:hover { background: none; color: #8a8fa3; }
 
         /* ---------- 分区卡片 ---------- */
         .ldx-section {
@@ -409,6 +587,8 @@
             margin: 8px 0;
             cursor: pointer;
         }
+        /* 偏移滑块默认隐藏（功能保留，调节仍生效），想恢复显示时删除下面这一行即可 */
+        #ldx-offset-slider { display: none; }
         .ldx-range::-webkit-slider-thumb {
             -webkit-appearance: none;
             appearance: none;
@@ -509,6 +689,11 @@
             color: #8a8fa3;
             margin-right: 8px;
             font-family: Consolas, monospace;
+            font-size: 11px;
+        }
+        .ldx-search-user {
+            color: #fb7299;
+            margin-right: 6px;
             font-size: 11px;
         }
 
@@ -626,7 +811,7 @@
             --ldx-scale: 1.0;
             transform-origin: left center;
             z-index: 1;
-            animation: ldx-scroll 8s linear;
+            animation: ldx-scroll ${DM_SCROLL_DURATION}s linear;
         }
         .ldx-dm.dm-type-sc {
             color: #ffe066;
@@ -714,12 +899,15 @@
     }
 
     // ==================== 弹幕加载与解析 ====================
-    function loadFile(file) {
-        if (!file) return;
-
-        // 偏移记忆判断：绝对值 >= 阈值重置为 0（视为特定视频的对齐值），< 阈值沿用记忆值
-        const savedOffset = parseFloat(localStorage.getItem(DM_OFFSET_KEY));
-        const loadOffset = (!isNaN(savedOffset) && Math.abs(savedOffset) < OFFSET_MEMORY_LIMIT) ? savedOffset : 0.0;
+    function loadXmlFromData(fileName, content, pairedOffset) {
+        // 历史文件：直接应用配对偏移；手动文件：走全局偏移记忆判断（>= 阈值重置为 0，< 阈值沿用）
+        let loadOffset = 0.0;
+        if (typeof pairedOffset === 'number' && !isNaN(pairedOffset)) {
+            loadOffset = pairedOffset;
+        } else {
+            const savedOffset = parseFloat(localStorage.getItem(DM_OFFSET_KEY));
+            loadOffset = (!isNaN(savedOffset) && Math.abs(savedOffset) < OFFSET_MEMORY_LIMIT) ? savedOffset : 0.0;
+        }
         fineTuneOffset = loadOffset;
         globalTimeOffset = loadOffset;
         localStorage.setItem(DM_OFFSET_KEY, String(loadOffset));
@@ -732,9 +920,16 @@
             statusBadge.classList.remove('ldx-loaded');
         }
 
+        currentHistoryName = fileName;
+        parseXMLDanmaku(content);
+        addToHistory(fileName, content, loadOffset);
+    }
+
+    function loadFile(file) {
+        if (!file) return;
         const reader = new FileReader();
         reader.onload = (e) => {
-            parseXMLDanmaku(e.target.result);
+            loadXmlFromData(file.name, e.target.result);
         };
         reader.readAsText(file, 'UTF-8');
     }
@@ -751,7 +946,7 @@
         const safeJSONParse = (str) => { try { return JSON.parse(str); } catch (e) { return null; } };
         const registerUser = (uid, name) => {
             if (!uid || !name || uid === 0) return;
-            const crc = crc32(uid.toString()).toString(16);
+            const crc = crc32(uid.toString()).toString(16).toLowerCase();
             hashToUserMap.set(crc, name);
         };
 
@@ -789,7 +984,7 @@
                     if (Array.isArray(rawData) && Array.isArray(rawData[0])) {
                         const info = rawData[0];
                         if (info.length > 7 && typeof info[7] === 'string') {
-                            hash = info[7];
+                            hash = info[7].toLowerCase();
                         }
                     }
                 }
@@ -866,6 +1061,14 @@
         fineTuneOffset = newFineTune;
         globalTimeOffset = fineTuneOffset;
         localStorage.setItem(DM_OFFSET_KEY, String(newFineTune));
+        // 同步当前文件在历史记录中的配对偏移
+        if (currentHistoryName) {
+            const historyEntry = fileHistory.find(h => h.name === currentHistoryName);
+            if (historyEntry) {
+                historyEntry.offset = fineTuneOffset;
+                scheduleHistorySave();
+            }
+        }
 
         updateGlobalOffsetDisplay();
 
@@ -1041,7 +1244,12 @@
 
         let displayText = dm.text;
 
-        if (cfgShowSender && dm.user) {
+        // 舰长/提督/总督弹幕：无论显示用户开关是否开启，都追加 (用户名)，不参与通用格式选择
+        if (dm.type === 'guard' && dm.user) {
+            displayText = `${displayText}(${dm.user})`;
+        } else if (dm.type === 'sc' && dm.user){
+        	displayText = `${displayText}(${dm.user})`;
+        } else if (cfgShowSender && dm.user) {
             switch (cfgUserFormat) {
                 case 2:
                     displayText = `${dm.user}: ${displayText}`;
@@ -1060,13 +1268,13 @@
 
         switch (dm.type) {
             case 'sc':
-                displayText = `[❓SC ￥${dm.price}] ${displayText}`;
+                displayText = `[👻SC ￥${dm.price}] ${displayText}`;
                 break;
             case 'gift':
                 displayText = `[🎁礼物] ${displayText}`;
                 break;
             case 'guard':
-                displayText = `[🚣舰长] ${displayText}`;
+                displayText = `[🚀舰长] ${displayText}`;
                 break;
         }
 
@@ -1086,6 +1294,9 @@
                 let scale = 1.0 + Math.log10(1.2 * cacheEntry.count);
                 scale = Math.min(scale, MAX_SCALE);
                 el.style.setProperty('--ldx-scale', scale);
+                // 合并条数越多，动画越长，弹幕在屏幕上停留越久
+                const extraDuration = Math.log10(1 * cacheEntry.count) * DM_MERGE_DURATION_BONUS;
+                el.style.animationDuration = (DM_SCROLL_DURATION + extraDuration) + 's';
                 el.style.zIndex = 10 + cacheEntry.count;
                 el.style.textShadow = '1px 1px 3px black, 0 0 3px black';
                 return;
@@ -1362,6 +1573,10 @@
                         <div class="ldx-sub">本地弹幕工具</div>
                         </div>
                         <div class="ldx-status" id="ldx-status">未加载</div>
+                        <div class="ldx-history-wrap">
+                            <button id="ldx-history-btn" class="ldx-history-btn" title="最近使用的弹幕文件">历史文件</button>
+                            <div id="ldx-history-menu" class="ldx-history-menu"></div>
+                        </div>
                     </div>
                     <div id="ldx-scroll">
                         <div class="ldx-section ldx-keep">
@@ -1404,15 +1619,15 @@
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-sc"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
-                                <span>显示 ID / 用户名</span>
+                                <span>显示 用户名</span>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-sender"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
-                                <span>显示礼物</span>
+                                <span>显示 礼物</span>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-gift"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
-                                <span>显示舰长</span>
+                                <span>显示 舰长</span>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-guard"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-field" id="ldx-user-format-field">
@@ -1460,10 +1675,23 @@
             // ---------- 引用 ----------
             loadBtn = document.getElementById('ldx-load-btn');
             statusBadge = document.getElementById('ldx-status');
+            historyBtn = document.getElementById('ldx-history-btn');
+            historyMenu = document.getElementById('ldx-history-menu');
             const fileInput = document.getElementById('ldx-file-input');
             const searchInput = document.getElementById('ldx-search-input');
             const searchBtn = document.getElementById('ldx-search-btn');
             const searchResults = document.getElementById('ldx-search-results');
+
+            // ---------- 历史文件 ----------
+            historyBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                historyMenu.classList.toggle('open');
+                updateHistoryMenu();
+            });
+            document.addEventListener('click', () => {
+                if (historyMenu) historyMenu.classList.remove('open');
+            });
+            updateHistoryMenu();
 
             // ---------- 加载 ----------
             fileInput.onchange = (e) => loadFile(e.target.files[0]);
@@ -1482,7 +1710,12 @@
                     searchResults.innerHTML = '<div class="ldx-search-item" style="cursor:default">暂无弹幕数据</div>';
                     return;
                 }
-                const matches = danmakuList.filter(d => d.text && d.text.includes(query));
+                // 同时匹配弹幕文本与用户名
+                const matches = danmakuList.filter(d => {
+                    if (!d.text) return false;
+                    if (d.text.includes(query)) return true;
+                    return !!(d.user && d.user.includes(query));
+                });
                 if (matches.length === 0) {
                     searchResults.style.display = 'block';
                     searchResults.innerHTML = '<div class="ldx-search-item" style="cursor:default">未找到匹配弹幕</div>';
@@ -1492,7 +1725,7 @@
                 matches.slice(0, 50).forEach(dm => {
                     const div = document.createElement('div');
                     div.className = 'ldx-search-item';
-                    div.innerHTML = `<span class="ldx-search-time">[${formatTime(dm.time)}]</span>${dm.text}`;
+                    div.innerHTML = `<span class="ldx-search-time">[${formatTime(dm.time)}]</span>${dm.user ? `<span class="ldx-search-user">${dm.user}</span>` : ''}${dm.text}`;
                     div.addEventListener('click', () => {
                         if (videoElement) {
                             videoElement.currentTime = dm.time + globalTimeOffset;

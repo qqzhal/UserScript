@@ -56,6 +56,9 @@
     .restart-btn { padding: 10px; font-weight: bold; font-size: 15px; border-radius: 12px; border: 2px solid #c0392b; background: #4a2020; color: #e0a0a0; cursor: pointer; margin-top: auto; transition: all 0.3s; }
     .restart-btn:hover { background: #622a2a; color: #ffcccc; }
     .restart-btn.glowing { border-color: #f0c040; background: #5a3020; color: #f0c040; box-shadow: 0 0 20px rgba(240,192,64,0.6), 0 0 40px rgba(240,192,64,0.3); animation: btnGlow 0.8s infinite alternate; }
+    .ai-btn { padding: 10px 8px; font-size: 15px; font-weight: bold; border-radius: 12px; border: 2px solid #3fae7a; background: #14352a; color: #8fe8b8; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px; }
+    .ai-btn:hover { background: #1d4a38; color: #b8f8d0; }
+    .ai-btn.busy { opacity: 0.6; cursor: wait; }
     .info-text { font-size: 12px; color: #999; text-align: center; }
     .danger-warning { color: #e08070; font-size: 12px; text-align: center; margin-top: 4px; animation: pulse 1.5s infinite; }
     .protection-info { color: #c0a060; font-size: 12px; text-align: center; margin-top: 4px; line-height: 1.4; }
@@ -85,6 +88,9 @@
     <button class="ability-btn" id="btnElephant">🐘 象 <span class="badge" id="badgeElephant">1</span></button>
     <button class="ability-btn" id="btnAdvisor">👤 士 <span class="badge" id="badgeAdvisor">1</span></button>
     <button class="recall-btn" id="btnRecall">🏰 回城</button>
+    <button class="ai-btn" id="btnAiFull">✨ 帮我走</button>
+    <button class="ai-btn" id="btnCopyState">📋 复制局面</button>
+    <button class="ai-btn" id="btnUndo">↩️ 悔棋</button>
     <div class="info-text"><strong>A/S/D/F</strong> 激活 · <strong>Z</strong> 取消能力 · <strong>R</strong> 回城（不可取消）</div>
     <div class="protection-info" id="protectionInfo">🛡盾击:能力总和≥5时被吃反杀</div>
     <div class="danger-warning">⚠敌人的威胁范围可能随行棋而改变</div>
@@ -112,19 +118,48 @@
   let B,PD,RP,BP,RS,AA=null,HC=[],GO=false,PT=true,BO=[],CID=0,LV=1,HS=0;
   let ATE=false,SC=6,DC=[],RT=false,cRM=null,cAM={},cAS=new Set(),cDL=new Set();
   let dTO=null,SWC=0,VA=false,RECALLING=false;
+  let solving=false,SOLVE_VER=0;
+  let LAST_RED=null;
+  let lossSteps=0;
+  let shieldBurns=0;
+  let lastKillUsed=false;
+  let REC_LOG=null,REC_ACTIVE=false;
+  let UNDO_STACK=[];
+  // 搜索内部用的伪随机数：按局面哈希做种子，同一局面结果固定；
+  // 真实游戏的黑方增援/顺序仍用 Math.random（真随机）
+  let RNG=Math.random;
+  function makeRNG(seed){
+    let a=seed>>>0;
+    return function(){
+      a|=0;a=a+0x6D2B79F5|0;
+      let t=Math.imul(a^a>>>15,1|a);
+      t=t+Math.imul(t^t>>>7,61|t)^t;
+      return ((t^t>>>14)>>>0)/4294967296;
+    };
+  }
+  function posHash(){
+    let h=2166136261;
+    const mix=(x)=>{h^=x;h=Math.imul(h,16777619)>>>0};
+    for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){const t=B[r][c];mix(t?t.charCodeAt(0):0);mix(r*9+c)}
+    for(const b of BP){mix(b.type.charCodeAt(0));mix(b.row*9+b.col);mix(b.order)}
+    mix(RP?RP.row*9+RP.col:0);
+    for(const k in RS)mix(RS[k]);
+    mix(LV);mix(ATE?1:0);mix(SWC);mix(LAST_RED?LAST_RED.fr*9+LAST_RED.fc:0);
+    return h;
+  }
 
   function lh(){try{HS=parseInt(localStorage.getItem('cr_hs'))||0}catch(e){HS=0};document.getElementById('highScoreDisplay').textContent=HS}
   function sh(){if(LV>HS){HS=LV;localStorage.setItem('cr_hs',HS)};document.getElementById('highScoreDisplay').textContent=HS}
-  function cd(sl){B=Array.from({length:ROWS},()=>Array(COLS).fill(null));PD={};BP=[];RP={row:9,col:4};RS={horse:1,cannon:1,elephant:1,advisor:1};AA=null;HC=[];GO=false;PT=true;BO=[];CID=0;ATE=false;DC=[];RT=false;cRM=null;cAM={};cAS=new Set();cDL=new Set();LV=sl||1;SWC=0;VA=false;RECALLING=false;btnRecall.classList.remove('recalling')}
+  function cd(sl){SOLVE_VER++;LAST_RED=null;REC_LOG=null;REC_ACTIVE=false;UNDO_STACK=[];B=Array.from({length:ROWS},()=>Array(COLS).fill(null));PD={};BP=[];RP={row:9,col:4};RS={horse:1,cannon:1,elephant:1,advisor:1};AA=null;HC=[];GO=false;PT=true;BO=[];CID=0;ATE=false;DC=[];RT=false;cRM=null;cAM={};cAS=new Set();cDL=new Set();LV=sl||1;SWC=0;VA=false;RECALLING=false;btnRecall.classList.remove('recalling')}
   function ta(){return RS.horse+RS.cannon+RS.elephant+RS.advisor}
   function ip(){return ta()>=5}
-  function rar(n){const k=['horse','cannon','elephant','advisor'];let r=n;while(r>0&&ta()>0){const x=k[Math.floor(Math.random()*4)];if(RS[x]>0){const d=Math.min(RS[x],r);RS[x]-=d;r-=d}}}
+  function rar(n){const k=['horse','cannon','elephant','advisor'];let r=n;while(r>0&&ta()>0){const x=k[Math.floor(RNG()*4)];if(RS[x]>0){const d=Math.min(RS[x],r);RS[x]-=d;r-=d}}}
   function pp(r,c,t){B[r][c]=t;const id=CID++;PD[`${r},${c}`]={type:t,id,row:r,col:c};if(t===T.R)RP={row:r,col:c};else if(AB.includes(t))BP.push({row:r,col:c,type:t,id,order:-1,hasMoved:false})}
   function rp2(r,c){const k=`${r},${c}`,info=PD[k];if(!info)return;B[r][c]=null;delete PD[k];if(info.type===T.R)RP=null;else if(AB.includes(info.type))BP=BP.filter(b=>b.id!==info.id)}
   function mp(fr,fc,tr,tc){const info=PD[`${fr},${fc}`];if(!info)return null;const ct=B[tr][tc];if(ct)rp2(tr,tc);B[fr][fc]=null;delete PD[`${fr},${fc}`];B[tr][tc]=info.type;PD[`${tr},${tc}`]={type:info.type,id:info.id,row:tr,col:tc};if(info.type===T.R)RP={row:tr,col:tc};else if(AB.includes(info.type)){const bp=BP.find(b=>b.id===info.id);if(bp){bp.row=tr;bp.col=tc}}cRM=null;cAM={};uac();return{movedType:info.type,capturedType:ct}}
   function ge(){const e=[];for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++)if(!B[r][c])e.push({row:r,col:c});return e}
   function bc(){return BP.length}
-  function shf(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}}
+  function shf(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(RNG()*(i+1));[a[i],a[j]]=[a[j],a[i]]}}
   function rdl(rr,rc){const l=new Set();for(const[dr,dc]of[[-1,0],[1,0],[0,-1],[0,1]]){let nr=rr+dr,nc=rc+dc;while(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS){l.add(`${nr},${nc}`);if(B[nr][nc]!==null)break;nr+=dr;nc+=dc}}return l}
   function aac(rr,rc,res){if(rr==null)return new Set();const atk=new Set();for(const m of rm(rr,rc,true))atk.add(`${m.row},${m.col}`);if(res.horse>0)for(const m of knm(rr,rc,true))atk.add(`${m.row},${m.col}`);if(res.cannon>0)for(const m of cnm(rr,rc,true))atk.add(`${m.row},${m.col}`);if(res.elephant>0)for(const m of elm(rr,rc,true))atk.add(`${m.row},${m.col}`);if(res.advisor>0)for(const m of adm(rr,rc,true))atk.add(`${m.row},${m.col}`);return atk}
   function uac(){if(RP){cAS=aac(RP.row,RP.col,RS);cDL=rdl(RP.row,RP.col)}else{cAS=new Set();cDL=new Set()}}
@@ -158,15 +193,73 @@
   function gm(r,c,t,ir){switch(t){case T.R:case T.BR:return rm(r,c,ir);case T.BN:return knm(r,c,ir);case T.BC:return cnm(r,c,ir);case T.BE:return elm(r,c,ir);case T.BA:return adm(r,c,ir);case T.BG:return gnm(r,c,ir);default:return[]}}
   function am(r,c,a){const ck=`${r},${c},${a}`;if(cAM[ck])return cAM[ck];let res;if(a==='horse')res=knm(r,c,true);else if(a==='cannon')res=cnm(r,c,true);else if(a==='elephant')res=elm(r,c,true);else if(a==='advisor')res=adm(r,c,true);else res=[];cAM[ck]=res;return res}
   function sr2(){const mxb=getMaxBlack();if(bc()>=mxb)return;const ms=mxb-bc();const cnt=Math.min(ATE?2:1,ms);if(cnt<=0)return;SWC++;for(let i=0;i<cnt;i++){const cell=psc(false);if(!cell)break;const t=csg()?rbt(false):rbt(true);if(!t)break;pp(cell.row,cell.col,t)}cRM=null;cAM={};uac();udc()}
-  function st(){if(GO)return;if(RECALLING&&RP){executeRecall();return}sr2();PT=true;BO=BP.map(b=>b.id);shf(BO);BP.forEach(b=>{b.order=BO.indexOf(b.id)+1;b.hasMoved=false});if(RP){HC=AA?am(RP.row,RP.col,AA).map(m=>({row:m.row,col:m.col,isCapture:m.cap})):rm(RP.row,RP.col,true).map(m=>({row:m.row,col:m.col,isCapture:m.cap}))}ui()}
+  function st(){if(GO)return;if(RECALLING&&RP){executeRecall();return}sr2();PT=true;BO=BP.map(b=>b.id);shf(BO);BP.forEach(b=>{b.order=BO.indexOf(b.id)+1;b.hasMoved=false});if(RP){HC=AA?am(RP.row,RP.col,AA).map(m=>({row:m.row,col:m.col,isCapture:m.cap})):rm(RP.row,RP.col,true).map(m=>({row:m.row,col:m.col,isCapture:m.cap}))}ui();pushUndo()}
   function executeRecall(){const sp=SPAWN_POINT;const fr=RP.row,fc=RP.col;const cap=B[sp.row][sp.col];const rookId=PD[`${fr},${fc}`].id;if(cap){rp2(sp.row,sp.col)}B[fr][fc]=null;delete PD[`${fr},${fc}`];B[sp.row][sp.col]=T.R;PD[`${sp.row},${sp.col}`]={type:T.R,id:rookId,row:sp.row,col:sp.col};RP={row:sp.row,col:sp.col};RECALLING=false;btnRecall.classList.remove('recalling');cRM=null;cAM={};uac();udc();if(cap===T.BG){sh();sv2();return}sr2();PT=true;BO=BP.map(b=>b.id);shf(BO);BP.forEach(b=>{b.order=BO.indexOf(b.id)+1;b.hasMoved=false});if(RP){HC=AA?am(RP.row,RP.col,AA).map(m=>({row:m.row,col:m.col,isCapture:m.cap})):rm(RP.row,RP.col,true).map(m=>({row:m.row,col:m.col,isCapture:m.cap}))}ui()}
-  async function ex(tr,tc){if(!PT||GO||!RP)return;const mv=HC.find(h=>h.row===tr&&h.col===tc);if(!mv){HC=[];AA=null;ui();return}const fr=RP.row,fc=RP.col,cap=B[tr][tc],used=AA;if(used){RS[used]--;AA=null;cAM={};uac()}await anim(fr,fc,tr,tc);mp(fr,fc,tr,tc);HC=[];if(cap){ATE=true;hcp(cap);if(cap===T.BG){udc();ui();sv2();return}}else{ATE=false}if(!RP){eg();ui();return}PT=false;udc();ui();await pb2();if(!GO){udc();st()}}
-  function hcp(t){if(t===T.BR){const p=['horse','cannon','elephant'];RS[p[Math.floor(Math.random()*3)]]++}else if(t===T.BN)RS.horse++;else if(t===T.BC)RS.cannon++;else if(t===T.BE)RS.elephant++;else if(t===T.BA)RS.advisor++;else if(t===T.BG){RS.horse++;RS.cannon++;RS.elephant++;RS.advisor++}uac()}
+  async function ex(tr,tc){if(!PT||GO||!RP)return;const mv=HC.find(h=>h.row===tr&&h.col===tc);if(!mv){HC=[];AA=null;ui();return}const fr=RP.row,fc=RP.col,cap=B[tr][tc],used=AA;if(used){RS[used]--;AA=null;cAM={};uac()}await anim(fr,fc,tr,tc);mp(fr,fc,tr,tc);LAST_RED={fr,fc};HC=[];if(cap){ATE=true;hcp(cap);if(cap===T.BG){udc();ui();sv2();return}}else{ATE=false}if(!RP){eg();ui();return}PT=false;udc();ui();await pb2();if(!GO){udc();st()}}
+  function hcp(t){if(t===T.BR){const p=['horse','cannon','elephant'];RS[p[Math.floor(RNG()*3)]]++}else if(t===T.BN)RS.horse++;else if(t===T.BC)RS.cannon++;else if(t===T.BE)RS.elephant++;else if(t===T.BA)RS.advisor++;else if(t===T.BG){RS.horse++;RS.cannon++;RS.elephant++;RS.advisor++}uac()}
   function protectedKillReward(t){hcp(t)}
-  async function pb2(){if(GO)return;const ua=BP.filter(b=>!b.hasMoved);if(!ua.length)return;const od=[...BO.filter(id=>ua.some(b=>b.id===id))];for(const id of ua.map(b=>b.id))if(!od.includes(id))od.push(id);for(const id of od){if(GO)return;const bp=BP.find(b=>b.id===id);if(!bp||bp.hasMoved)continue;BP.forEach(b=>{if(!b.hasMoved)b.order=od.indexOf(b.id)+1});ui();await slp(200);if(GO)return;const move=aim(bp);if(move){const tt=B[move.row][move.col];if(tt===T.R){if(ip()){await anim(bp.row,bp.col,RP.row,RP.col);const rr=RP.row,rc=RP.col;B[bp.row][bp.col]=null;delete PD[`${bp.row},${bp.col}`];B[rr][rc]=bp.type;PD[`${rr},${rc}`]={type:bp.type,id:bp.id,row:rr,col:rc};bp.row=rr;bp.col=rc;await slp(300);rar(5);protectedKillReward(bp.type);rp2(rr,rc);pp(rr,rc,T.R);bp.hasMoved=true;bp.order=-1;cRM=null;cAM={};uac();udc();ui();if(bp.type===T.BG){sv2();return}}else{await anim(bp.row,bp.col,RP.row,RP.col);mp(bp.row,bp.col,RP.row,RP.col);bp.hasMoved=true;bp.order=-1;udc();ui();eg();return}}else{await anim(bp.row,bp.col,move.row,move.col);mp(bp.row,bp.col,move.row,move.col);bp.hasMoved=true;bp.order=-1}}else{bp.hasMoved=true;bp.order=-1}udc();ui()}}
+  async function pb2(){
+    if(GO)return;
+    const ua=BP.filter(b=>!b.hasMoved);
+    if(!ua.length)return;
+    const od=[...BO.filter(id=>ua.some(b=>b.id===id))];
+    for(const id of ua.map(b=>b.id))if(!od.includes(id))od.push(id);
+    for(const id of od){
+      if(GO)return;
+      const bp=BP.find(b=>b.id===id);
+      if(!bp||bp.hasMoved)continue;
+      BP.forEach(b=>{if(!b.hasMoved)b.order=od.indexOf(b.id)+1});
+      ui();
+      await slp(200);
+      if(GO)return;
+      const fr=bp.row,fc=bp.col;
+      const move=aim(bp);
+      if(move){
+        const tt=B[move.row][move.col];
+        const rec={id:bp.id,t:bp.type,fr,fc,tr:move.row,tc:move.col,o:bp.order};
+        if(tt===T.R){
+          if(ip()){
+            rec.action='captureRook';rec.kill=true;
+            await anim(bp.row,bp.col,RP.row,RP.col);
+            const rr=RP.row,rc=RP.col;
+            B[bp.row][bp.col]=null;delete PD[`${bp.row},${bp.col}`];
+            B[rr][rc]=bp.type;PD[`${rr},${rc}`]={type:bp.type,id:bp.id,row:rr,col:rc};
+            bp.row=rr;bp.col=rc;
+            await slp(300);
+            rar(5);
+            protectedKillReward(bp.type);
+            rec.rsAfter={...RS};
+            rp2(rr,rc);pp(rr,rc,T.R);
+            bp.hasMoved=true;bp.order=-1;
+            cRM=null;cAM={};uac();udc();ui();
+            if(REC_ACTIVE&&REC_LOG)REC_LOG.blackMoves.push(rec);
+            if(bp.type===T.BG){sv2();return}
+          }else{
+            rec.action='captureRook';rec.kill=false;
+            await anim(bp.row,bp.col,RP.row,RP.col);
+            mp(bp.row,bp.col,RP.row,RP.col);
+            bp.hasMoved=true;bp.order=-1;
+            if(REC_ACTIVE&&REC_LOG)REC_LOG.blackMoves.push(rec);
+            udc();ui();eg();return;
+          }
+        }else{
+          rec.action='move';
+          await anim(bp.row,bp.col,move.row,move.col);
+          mp(bp.row,bp.col,move.row,move.col);
+          bp.hasMoved=true;bp.order=-1;
+          if(REC_ACTIVE&&REC_LOG)REC_LOG.blackMoves.push(rec);
+        }
+      }else{
+        if(REC_ACTIVE&&REC_LOG)REC_LOG.blackMoves.push({id:bp.id,t:bp.type,fr,fc,o:bp.order,action:'noMove'});
+        bp.hasMoved=true;bp.order=-1;
+      }
+      udc();ui();
+    }
+  }
   function ral(r1,c1,r2,c2){if(r1===r2){for(let i=Math.min(c1,c2)+1;i<Math.max(c1,c2);i++)if(B[r1][i]!==null)return false;return true}if(c1===c2){for(let i=Math.min(r1,r2)+1;i<Math.max(r1,r2);i++)if(B[i][c1]!==null)return false;return true}return false}
   function getAllyMoves(piece){return gm(piece.row,piece.col,piece.type,false)}
   function countDefendersAt(row,col,excludeId){
+    if(!RP||row!==RP.row||col!==RP.col)return 0;
     let count=0;
     for(const o of BP){
       if(o.id===excludeId)continue;
@@ -297,6 +390,545 @@
     scored.sort((a,b)=>b.score-a.score);
     return scored[0].move;
   }
+  // ---- 最优解求解器 ----
+  // 红方视角向前推演：每步模拟黑方用现有 aim() 应手，深度2（车→黑→车→黑），叶子用启发式估值
+  function saveCoreState(){
+    return {B:B.map(r=>r.slice()),PD:Object.assign({},PD),BP:BP.map(b=>({...b})),RP:RP?{...RP}:null,RS:{...RS},ATE:ATE,GO:GO,PT:PT,CID:CID,cAS:new Set(cAS),cDL:new Set(cDL)};
+  }
+  function loadCoreState(s){
+    B=s.B.map(r=>r.slice());
+    PD=Object.assign({},s.PD);
+    BP=s.BP.map(b=>({...b}));
+    RP=s.RP?{...s.RP}:null;
+    RS={...s.RS};
+    ATE=s.ATE;GO=s.GO;PT=s.PT;CID=s.CID;
+    cAS=new Set(s.cAS);cDL=new Set(s.cDL);
+    cRM=null;cAM={};
+  }
+  function genRedCandidates(allowAbilities){
+    const res=[],seen=new Set();
+    const push=(m,ability)=>{const k=`${m.row},${m.col}`;if(seen.has(k))return;seen.add(k);res.push({fr:RP.row,fc:RP.col,tr:m.row,tc:m.col,cap:m.cap,ability})};
+    for(const m of rm(RP.row,RP.col,true))push(m,null);
+    if(allowAbilities){
+      for(const a of ['horse','cannon','elephant','advisor']){
+        if(RS[a]<=0)continue;
+        for(const m of am(RP.row,RP.col,a))push(m,a);
+      }
+    }
+    return res;
+  }
+  function simBlackTurn(){
+    // 按回合开始时界面徽章显示的实际行棋顺序行动（order 1..N），
+    // 这样玩家走完这步后黑方怎么应手是确定可预知的；
+    // 未来回合顺序未知时（order<=0）退化为当前数组顺序
+    const order=BP.slice().sort((a,b)=>(a.order>0?a.order:999)-(b.order>0?b.order:999));
+    let acted=0;
+    for(const bp of order){
+      if(GO)break;
+      if(bp.hasMoved)continue;
+      acted++;
+      const move=aim(bp);
+      if(move){
+        const tt=B[move.row][move.col];
+        if(tt===T.R){
+          if(ip()){
+            shieldBurns++;
+            const rr=RP.row,rc=RP.col;
+            B[bp.row][bp.col]=null;delete PD[`${bp.row},${bp.col}`];
+            B[rr][rc]=bp.type;PD[`${rr},${rc}`]={type:bp.type,id:bp.id,row:rr,col:rc};
+            bp.row=rr;bp.col=rc;
+            rar(5);
+            protectedKillReward(bp.type);
+            rp2(rr,rc);pp(rr,rc,T.R);
+            bp.hasMoved=true;bp.order=-1;
+            cRM=null;cAM={};uac();
+            if(bp.type===T.BG){GO=true;return 'win'}
+          }else{
+            mp(bp.row,bp.col,RP.row,RP.col);
+            bp.hasMoved=true;bp.order=-1;
+            lossSteps=acted;
+            GO=true;return 'loss';
+          }
+        }else{
+          mp(bp.row,bp.col,move.row,move.col);
+          bp.hasMoved=true;bp.order=-1;
+        }
+      }else{
+        bp.hasMoved=true;bp.order=-1;
+      }
+    }
+    return 'ok';
+  }
+  function endTurn(){
+    if(GO)return;
+    // 与真实 st() 一致：下一回合黑方重新洗牌并编号
+    const ids=BP.map(b=>b.id);
+    shf(ids);
+    BP.forEach(b=>{b.order=ids.indexOf(b.id)+1;b.hasMoved=false});
+  }
+  function applyRedMove(c){
+    shieldBurns=0;
+    if(c.ability&&RS[c.ability]>0)RS[c.ability]--;
+    const cap=B[c.tr][c.tc];
+    mp(c.fr,c.fc,c.tr,c.tc);
+    if(cap===T.BG){GO=true;return 'win'}
+    if(cap){ATE=true;hcp(cap)}else ATE=false;
+    if(!RP){GO=true;return 'loss'}
+    // 下一轮黑方顺序已精确可知（界面徽章），交给 simBlackTurn 精确判定；
+    // 不再用“能吃到就判负”的硬规则，避免误杀顺序上其实安全的走法
+    BP.forEach(b=>b.hasMoved=false);
+    const r=simBlackTurn();
+    if(r!=='ok')return r;
+    endTurn();
+    return 'ok';
+  }
+  function quickScore(c){
+    let s=0;
+    const tt=B[c.tr][c.tc];
+    if(tt){const v={[T.BG]:1e7,[T.BR]:520,[T.BC]:420,[T.BN]:260,[T.BE]:210,[T.BA]:160}[tt]||0;s+=v}
+    const gen=BP.find(b=>b.type===T.BG);
+    if(gen){
+      // 修正：比较“候选点与黑将距离”和“当前与黑将距离”，越近越高分
+      const nd=Math.max(Math.abs(c.tr-gen.row),Math.abs(c.tc-gen.col));
+      const od=Math.max(Math.abs(RP.row-gen.row),Math.abs(RP.col-gen.col));
+      s+=(od-nd)*120;
+      if(c.tr===gen.row||c.tc===gen.col){
+        // 同线加分，但中间被山封死则不加，避免往死线走
+        let blocked=false;
+        if(c.tr===gen.row){
+          const mn=Math.min(c.tc,gen.col),mx=Math.max(c.tc,gen.col);
+          for(let i=mn+1;i<mx;i++)if(B[c.tr][i]===T.S){blocked=true;break}
+        }else{
+          const mn=Math.min(c.tr,gen.row),mx=Math.max(c.tr,gen.row);
+          for(let i=mn+1;i<mx;i++)if(B[i][c.tc]===T.S){blocked=true;break}
+        }
+        if(!blocked)s+=200;
+      }
+    }else{
+      s-=Math.abs(c.tr-4.5)*45+Math.abs(c.tc-4)*20;
+    }
+    if(c.ability)s-=30;
+    return s;
+  }
+  // 安全吃子的高额奖励：模拟确认不会被回吃后，吃子线额外加分（可打断追将）
+  function captureBonus(t){
+    const v={[T.BR]:350,[T.BC]:350,[T.BN]:300,[T.BE]:260,[T.BA]:220}[t];
+    return v||200;
+  }
+  // 吃子总奖励：用道具吃要折价——马/炮是强道具，花了可能回不来同类型；
+  // 士/象是弱道具，用来吃車（回马/炮/象随机点）反而划算，不折价
+  function captureReward(c,capType){
+    let b=captureBonus(capType||0);
+    if(c.ability)b-=150;
+    if(c.ability==='elephant'||c.ability==='advisor')b+=150;
+    return b;
+  }
+  // 无护盾时的“两步内威胁”检测：马一步能跳到攻击位、车一步能走上车线
+  function knightThreatSoon(){
+    if(!RP)return false;
+    const sd=[[-2,-1],[-2,1],[2,-1],[2,1],[-1,-2],[-1,2],[1,-2],[1,2]];
+    const isAttack=(r,c)=>{
+      const dr=Math.abs(RP.row-r),dc=Math.abs(RP.col-c);
+      return (dr===2&&dc===1)||(dr===1&&dc===2);
+    };
+    for(const b of BP){
+      if(b.type!==T.BN)continue;
+      for(const[dr,dc]of sd){
+        const tr=b.row+dr,tc=b.col+dc;
+        if(!ib(tr,tc)||B[tr][tc]!==null)continue;
+        const lr=Math.abs(dr)===2?b.row+dr/2:b.row, lc=Math.abs(dr)===2?b.col:b.col+dc/2;
+        if(B[lr][lc])continue;
+        if(isAttack(tr,tc))return true;
+        // 两步：从(tr,tc)再跳一步到攻击位
+        for(const[dr2,dc2]of sd){
+          const ar=tr+dr2,ac=tc+dc2;
+          if(!ib(ar,ac)||B[ar][ac]!==null)continue;
+          const lr2=Math.abs(dr2)===2?tr+dr2/2:tr, lc2=Math.abs(dr2)===2?tc:tc+dc2/2;
+          if(B[lr2][lc2])continue;
+          if(isAttack(ar,ac))return true;
+        }
+      }
+    }
+    return false;
+  }
+  function rookThreatSoon(){
+    if(!RP)return false;
+    const dirs=[[-1,0],[1,0],[0,-1],[0,1]];
+    for(const b of BP){
+      if(b.type!==T.BR)continue;
+      for(const[dr,dc]of dirs){
+        let nr=b.row+dr,nc=b.col+dc;
+        while(ib(nr,nc)){
+          if(B[nr][nc]!==null)break;
+          if(nr===RP.row){
+            const mn=Math.min(nc,RP.col),mx=Math.max(nc,RP.col);
+            let clear=true;
+            for(let i=mn+1;i<mx;i++)if(B[nr][i]!==null){clear=false;break}
+            if(clear)return true;
+          }
+          if(nc===RP.col){
+            const mn=Math.min(nr,RP.row),mx=Math.max(nr,RP.row);
+            let clear=true;
+            for(let i=mn+1;i<mx;i++)if(B[i][nc]!==null){clear=false;break}
+            if(clear)return true;
+          }
+          nr+=dr;nc+=dc;
+        }
+      }
+    }
+    return false;
+  }
+  function evalRed(){
+    if(!RP)return -1e9;
+    const gen=BP.find(b=>b.type===T.BG);
+    const av=RS.horse*1.1+RS.cannon*1.3+RS.elephant*1.0+RS.advisor*0.8;
+    let sc=av*60-BP.length*80;
+    if(ip())sc+=400;
+    // 护盾消耗惩罚：被反杀一次就掉5点能力，烧盾换吃子不划算
+    sc-=shieldBurns*150;
+    // 机动性：可走格太少说明快被围死（轻度）
+    let mob=rm(RP.row,RP.col,true).length;
+    for(const a of ['horse','cannon','elephant','advisor'])if(RS[a]>0)mob+=am(RP.row,RP.col,a).length;
+    sc+=Math.min(mob,12)*10;
+    // 深入敌方后排的惩罚（轻度）
+    if(RP.row<=2)sc-=(3-RP.row)*80;
+    if(RP.row>=8)sc+=15;
+    if(RP.col===0||RP.col===8)sc-=30;
+    if(gen){
+      const d=dtr(gen.row,gen.col);
+      sc-=d*120;
+      if(getThreatLineToGeneral())sc+=500;
+      if(d<=1)sc+=1800;
+      if(RP.row===gen.row||RP.col===gen.col){
+        // 同线加分，但中间被山封死则不加
+        let blocked=false;
+        if(RP.row===gen.row){
+          const mn=Math.min(RP.col,gen.col),mx=Math.max(RP.col,gen.col);
+          for(let i=mn+1;i<mx;i++)if(B[RP.row][i]===T.S){blocked=true;break}
+        }else{
+          const mn=Math.min(RP.row,gen.row),mx=Math.max(RP.row,gen.row);
+          for(let i=mn+1;i<mx;i++)if(B[i][RP.col]===T.S){blocked=true;break}
+        }
+        if(!blocked)sc+=250;
+      }
+    }else{
+      // 黑将未出：居中站位最重要，行优先（车需要往上推进，横向偏移次要）
+      sc-=Math.abs(RP.row-4.5)*50+Math.abs(RP.col-4)*25;
+      // 吃子机会：当前一步内能吃到的黑子越多越好，站位要靠近可吃目标
+      const reach=new Set();
+      for(const m of rm(RP.row,RP.col,true))reach.add(`${m.row},${m.col}`);
+      for(const a of ['horse','cannon','elephant','advisor'])if(RS[a]>0)for(const m of am(RP.row,RP.col,a))reach.add(`${m.row},${m.col}`);
+      let capOpp=0;
+      for(const b of BP)if(reach.has(`${b.row},${b.col}`))capOpp++;
+      sc+=capOpp*35;
+    }
+    if(!ip()){
+      for(const b of BP)if(gm(b.row,b.col,b.type,false).some(m=>m.cap&&m.row===RP.row&&m.col===RP.col)){sc-=1500;break}
+      if(knightThreatSoon())sc-=500;
+      if(rookThreatSoon())sc-=500;
+    }
+    return sc;
+  }
+  // 将杀搜索器：黑将已在场上时，窄而深地找一条真正能吃掉将的路线。
+  // 不看估值分，只按“吃将=赢、被吃=输、其余继续推”的规则深搜，最深5层。
+  async function findGeneralKill(allowAbilities,t0,budget){
+    const gen=BP.find(b=>b.type===T.BG);
+    if(!gen)return null;
+    const root=saveCoreState();
+    // 先全量扫描所有候选：任何“一步吃将/将自杀反杀”都是当前轮内确定的赢法，
+    // 不受候选数限制和排序影响，直接返回最便宜的
+    let direct=null;
+    for(const c of genRedCandidates(allowAbilities)){
+      loadCoreState(root);
+      const r=applyRedMove(c);
+      if(r==='win'){
+        const nb=shieldBurns+(c.ability?1:0);
+        if(!direct||nb<direct.nb)direct={nb,na:c.ability?1:0,c,nm:1};
+      }
+    }
+    // 两步必胜扫描：红走→本轮黑方精确应手→红再走一步吃将，完全确定不依赖未来洗牌
+    let short=null;
+    loadCoreState(root);  // 直接扫描会残留状态，这里必须先恢复
+    for(const c of genRedCandidates(allowAbilities)){
+      loadCoreState(root);
+      const r=applyRedMove(c);
+      // 红方下一步先手吃将，暴露来不及被利用，这里只要求本轮安全即可
+      if(r!=='ok')continue;
+      const cBurns=shieldBurns;  // 必须先存下第一步的烧盾数（第二步会重置）
+      const mid=saveCoreState();
+      for(const c2 of genRedCandidates(allowAbilities)){
+        loadCoreState(mid);
+        if(B[c2.tr][c2.tc]!==T.BG)continue;
+        const r2=applyRedMove(c2);
+        if(r2==='win'){
+          const nb=cBurns+(c.ability?1:0)+(c2.ability?1:0);
+          const na=(c.ability?1:0)+(c2.ability?1:0);
+          if(!short||nb<short.nb||(nb===short.nb&&na<short.na))short={nb,na,c,nm:2};
+        }
+      }
+    }
+    // 零烧盾必胜搜索：只走全程无反杀的路线，找任意深度的无伤赢法
+    const gd2=(r,c)=>Math.max(Math.abs(r-gen.row),Math.abs(c-gen.col));
+    function cleanPromising(c){
+      if(B[c.tr][c.tc]===T.BG)return true;
+      if(gd2(c.tr,c.tc)<gd2(RP.row,RP.col))return true;
+      if(c.tr===gen.row||c.tc===gen.col)return true;
+      if(c.cap)return true;
+      return false;
+    }
+    function dfsClean(snap,depth,moves,abilities){
+      loadCoreState(snap);
+      const cands=genRedCandidates(allowAbilities).filter(cleanPromising).sort((a,b)=>(a.ability?1:0)-(b.ability?1:0)||quickScore(b)-quickScore(a));
+      const n=Math.min(cands.length,8);
+      let best=null;
+      for(let i=0;i<n;i++){
+        if(Date.now()-t0>budget)break;
+        loadCoreState(snap);
+        const r=applyRedMove(cands[i]);
+        if(shieldBurns>0)continue;  // 任何烧盾都不算无伤
+        if(r==='win'){
+          const cand={nb:0,nm:moves+1,na:abilities+(cands[i].ability?1:0),c:cands[i]};
+          if(!best||cand.nm<best.nm||(cand.nm===best.nm&&cand.na<best.na))best=cand;
+          continue;
+        }
+        if(r==='loss'||depth<=1)continue;
+        const mid=saveCoreState();
+        const sub=dfsClean(mid,depth-1,moves+1,abilities+(cands[i].ability?1:0));
+        if(sub){
+          const cand={nb:0,nm:sub.nm,na:sub.na,c:cands[i]};
+          if(!best||cand.nm<best.nm||(cand.nm===best.nm&&cand.na<best.na))best=cand;
+        }
+      }
+      return best;
+    }
+    const cleanWin=dfsClean(root,5,0,0);
+    loadCoreState(root);
+    if(cleanWin)return cleanWin.c;
+    // 没有无伤赢法时，才允许“两步内、烧1次盾”的赢法；更长的推测性赢法交给主搜索
+    let best=null;
+    if(direct&&short){
+      if(direct.nb<short.nb||(direct.nb===short.nb&&1<short.nm)||(direct.nb===short.nb&&1===short.nm&&direct.na<short.na))best=direct;
+      else best=short;
+    }else best=direct||short;
+    // 硬门槛：烧盾2次以上的“赢法”代价太高，不采用（交回主搜索选稳妥走法）
+    if(best&&best.nb<=1)return best.c;
+    return null;
+  }
+  function searchState(snap,allowAbilities,depth,limit,t0,budget){
+    const cands=genRedCandidates(allowAbilities);
+    if(!cands.length)return -1e9;
+    cands.sort((a,b)=>quickScore(b)-quickScore(a));
+    const n=Math.min(cands.length,limit);
+    let best=-1e10;
+      for(let i=0;i<n;i++){
+        if(Date.now()-t0>budget)break;
+        loadCoreState(snap);
+        const capType=B[cands[i].tr][cands[i].tc];
+        const r=applyRedMove(cands[i]);
+        const cleanCap=!!(cands[i].cap&&r==='ok'&&capType&&shieldBurns===0);
+        let s;
+        if(r==='win')s=1e9;
+        else if(r==='loss'){
+          // 第一轮就死的走法，补偿分封顶400，永远低于任何第一轮安全的走法
+          s=-1e9+Math.min(lossSteps*25+(cands[i].cap&&capType?captureReward(cands[i],capType):0),400);
+        }else if(depth<=1)s=evalRed();
+        else{
+          // 深层分数只用来发现更好的路，不允许单次随机采样把明显好的局面压下去
+          const d1s=evalRed();
+          const mid=saveCoreState();
+          const refined=searchState(mid,allowAbilities,depth-1,Math.max(4,Math.ceil(limit*0.7)),t0,budget);
+          s=Math.max(d1s,refined);
+          // 第一轮安全的走法，即使后续推演全被判负，也保底高于第一轮就死的走法
+          if(s<-1e9+500)s=-1e9+500;
+        }
+        if(cleanCap)s+=captureReward(cands[i],capType);
+        if(s>best)best=s;
+        if(best>=1e9)break;
+      }
+    return best;
+  }
+  async function computeBestMove(allowAbilities,budgetMs){
+    const t0=Date.now(),budget=budgetMs||3500;
+    const root=saveCoreState();
+    // 用局面哈希做种子：同一局面，搜索内部随机序列固定，结果确定
+    RNG=makeRNG(posHash());
+    const cands=genRedCandidates(allowAbilities);
+    if(!cands.length)return null;
+    for(const c of cands)if(B[c.tr][c.tc]===T.BG)return c;
+    // 深度1：所有候选都用精确模拟评分（确定性），作为可靠排名
+    const scored=[];
+    for(let i=0;i<cands.length;i++){
+      if(Date.now()-t0>budget)break;
+      loadCoreState(root);
+      const c=cands[i];
+      const capType=B[c.tr][c.tc];
+      const r=applyRedMove(c);
+      const cleanCap=!!(c.cap&&r==='ok'&&capType&&shieldBurns===0);
+      let s;
+      if(r==='win')s=1e9;
+      else if(r==='loss'){
+        // 第一轮就死的走法，补偿分封顶400，永远低于任何第一轮安全的走法
+        s=-1e9+Math.min(lossSteps*25+(c.cap&&capType?captureReward(c,capType):0),400);
+      }else s=evalRed();
+      // 防原地折返：刚离开的格子立刻走回去要扣分
+      if(LAST_RED&&c.tr===LAST_RED.fr&&c.tc===LAST_RED.fc)s-=150;
+      if(cleanCap)s+=captureReward(c,capType);
+      scored.push({c,s,cleanCap});
+      if(i%4===3)await slp(0);
+    }
+    scored.sort((a,b)=>b.s-a.s);
+    if(!scored.length)return null;
+    let bestMove=scored[0].c,bestScore=scored[0].s;
+    // 深度1排名第一是“干净吃子”时直接执行：白吃子是可靠收益，
+    // 只有吃将或已验证的杀将路线能优先于它，不让位置分/采样噪声覆盖
+    if(scored[0].cleanCap&&scored[0].c.cap){
+      loadCoreState(root);
+      return scored[0].c;
+    }
+    // 深度1第一不是干净吃子时，才让将杀搜索器介入（只找两步内确定必胜），
+    // 保证“白吃子”不会被推测性赢法抢走
+    loadCoreState(root);  // 深度1扫描会残留状态，先恢复
+    const kill=await findGeneralKill(allowAbilities,t0,Math.min(budget,1500));
+    if(kill){lastKillUsed=true;return kill}
+    lastKillUsed=false;
+    // 深度2/3：只精修深度1前5名（按深度1排名，不是quickScore），双采样取平均；
+    // 深层分数严格更好才替换，避免采样噪声把明显差的走法抬上去
+    const top=scored.slice(0,5);
+    for(let depth=2;depth<=3;depth++){
+      for(let i=0;i<top.length;i++){
+        if(Date.now()-t0>budget)break;
+        const item=top[i];
+        loadCoreState(root);
+        const capType=B[item.c.tr][item.c.tc];
+        const r=applyRedMove(item.c);
+        let s;
+        if(r==='win')s=1e9;
+        else if(r==='loss'){
+          s=-1e9+Math.min(lossSteps*25+(item.c.cap&&capType?captureReward(item.c,capType):0),400);
+        }else{
+          const d1s=evalRed();
+          const mid=saveCoreState();
+          const s1=searchState(mid,allowAbilities,depth-1,depth===2?8:5,t0,budget);
+          loadCoreState(root);
+          const r2=applyRedMove(item.c);
+          let s2=s1;
+          if(r2==='win')s2=1e9;
+          else if(r2==='ok'){
+            const mid2=saveCoreState();
+            s2=searchState(mid2,allowAbilities,depth-1,depth===2?8:5,t0,budget);
+          }
+          // 双采样取平均，且深度1分兜底
+          s=Math.max(d1s,(s1+s2)/2);
+          if(s<-1e9+500)s=-1e9+500;
+        }
+        if(LAST_RED&&item.c.tr===LAST_RED.fr&&item.c.tc===LAST_RED.fc)s-=150;
+        if(item.cleanCap&&r!=='loss')s+=captureReward(item.c,capType);
+        // 精修必须明显更好（高出400分）或找到必胜才允许覆盖深度1结论，
+        // 避免位置分/采样噪声把“白吃子”这种可靠收益压下去
+        const needMargin=s>=1e9?0:400;
+        if(s>bestScore+needMargin){bestScore=s;bestMove=item.c}
+        if(bestScore>=1e9)break;
+      }
+      if(bestScore>=1e9)break;
+    }
+    loadCoreState(root);
+    return bestMove;
+  }
+  const btnAiFull=document.getElementById('btnAiFull');
+  async function aiMove(){
+    if(GO||!PT||!RP||solving||VA)return;
+    solving=true;PT=false;
+    const ver=SOLVE_VER;
+    const flLabel=btnAiFull.textContent;
+    btnAiFull.textContent='⏳ 计算中…';
+    btnAiFull.disabled=true;br.disabled=true;
+    btnAiFull.classList.add('busy');
+    const move=await computeBestMove(true);
+    RNG=Math.random;  // 恢复真实游戏的真随机
+    solving=false;PT=true;
+    btnAiFull.textContent=flLabel;
+    btnAiFull.disabled=false;br.disabled=false;
+    btnAiFull.classList.remove('busy');
+    if(ver!==SOLVE_VER)return;
+    if(!move||GO||!PT||!RP)return;
+    if(move.ability&&RS[move.ability]<=0)return;
+    // 记录回合档案：点击前布局 + 求解器选择 + 黑方应手
+    REC_LOG={pre:statePayload(),move:{fr:move.fr,fc:move.fc,tr:move.tr,tc:move.tc,ability:move.ability||null,cap:!!move.cap},blackMoves:[]};
+    AA=move.ability||null;
+    HC=[{row:move.tr,col:move.tc,isCapture:!!B[move.tr][move.tc]}];
+    ui();
+    REC_ACTIVE=true;
+    try{await ex(move.tr,move.tc)}finally{REC_ACTIVE=false}
+  }
+  btnAiFull.onclick=()=>aiMove();
+  const btnCopyState=document.getElementById('btnCopyState');
+  function flashCopyMsg(msg){
+    const old=btnCopyState.textContent;
+    btnCopyState.textContent=msg;
+    setTimeout(()=>{btnCopyState.textContent=old},1200);
+  }
+  function fallbackCopy(text){
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.style.position='fixed';ta.style.opacity='0';
+      (document.body||document.documentElement).appendChild(ta);
+      ta.select();
+      const ok=document.execCommand?document.execCommand('copy'):false;
+      (document.body||document.documentElement).removeChild(ta);
+      flashCopyMsg(ok?'✓ 已复制':'✗ 复制失败');
+    }catch(e){flashCopyMsg('✗ 复制失败')}
+  }
+  function statePayload(){
+    const data={v:2,lv:LV,rook:RP?{r:RP.row,c:RP.col}:null,rs:{...RS},ate:ATE,swc:SWC,sc:SC,lastRed:LAST_RED,stones:[],blacks:[]};
+    for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+      if(B[r][c]===T.S)data.stones.push([r,c]);
+      else if(B[r][c]&&B[r][c]!==T.R){
+        const bp=BP.find(b=>b.row===r&&b.col===c);
+        data.blacks.push({t:B[r][c],r,c,id:bp?bp.id:-1,o:bp?bp.order:-1,m:bp?bp.hasMoved:false});
+      }
+    }
+    return data;
+  }
+  function copyState(){
+    const text=REC_LOG
+      ? 'GUOCHIYI_TURN '+JSON.stringify({pre:REC_LOG.pre,move:REC_LOG.move,black:REC_LOG.blackMoves,post:statePayload()})
+      : 'GUOCHIYI_STATE '+JSON.stringify(statePayload());
+    if(typeof navigator!=='undefined'&&navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(()=>flashCopyMsg('✓ 已复制'),()=>fallbackCopy(text));
+    }else fallbackCopy(text);
+  }
+  btnCopyState.onclick=copyState;
+  // 悔棋：利用完整局面快照，每回合开始压栈，悔棋时弹栈恢复
+  const btnUndo=document.getElementById('btnUndo');
+  function snapshotFull(){
+    return {core:saveCoreState(),LV,SWC,SC,LAST_RED,VA,RECALLING,AA,HC:HC.slice(),BO:[...BO]};
+  }
+  function restoreFull(s){
+    loadCoreState(s.core);
+    LV=s.LV;SWC=s.SWC;SC=s.SC;LAST_RED=s.LAST_RED;VA=s.VA;RECALLING=s.RECALLING;AA=s.AA;HC=s.HC.slice();BO=[...s.BO];
+    if(dTO){clearTimeout(dTO);dTO=null}
+    vo.style.display=VA?'flex':'none';
+    df.style.display='none';
+    br.classList.remove('glowing');
+    btnRecall.classList.remove('recalling');
+    REC_LOG=null;
+    ui();
+  }
+  function pushUndo(){
+    const snap=snapshotFull();
+    const last=UNDO_STACK[UNDO_STACK.length-1];
+    if(last&&JSON.stringify(last.core)===JSON.stringify(snap.core))return;
+    UNDO_STACK.push(snap);
+    if(UNDO_STACK.length>60)UNDO_STACK.shift();
+  }
+  function doUndo(){
+    if(solving||REC_ACTIVE)return;
+    if(UNDO_STACK.length<2)return;
+    UNDO_STACK.pop();
+    restoreFull(UNDO_STACK[UNDO_STACK.length-1]);
+  }
+  btnUndo.onclick=doUndo;
   function slp(ms){return new Promise(r=>setTimeout(r,ms))}
   function anim(fr,fc,tr,tc){return new Promise(resolve=>{const piece=pl.querySelector(`.piece[data-row="${fr}"][data-col="${fc}"]`);if(!piece){resolve();return}const to=cp(tr,tc);piece.style.transition='left 0.12s ease-in-out, top 0.12s ease-in-out';piece.style.left=to.x+'px';piece.style.top=to.y+'px';piece.dataset.row=tr;piece.dataset.col=tc;const oe=()=>{piece.style.transition='';resolve()};piece.addEventListener('transitionend',oe,{once:true});setTimeout(()=>{if(piece.parentNode)oe()},150)})}
   function restart(){cdto();vo.style.display='none';df.style.display='none';VA=false;RECALLING=false;btnRecall.classList.remove('recalling');br.classList.remove('glowing');cpl();ctx.clearRect(0,0,540,600);LV=1;SWC=0;sb(false);GO=false;PT=true;sh();ui();st()}
@@ -305,7 +937,7 @@
   btnRecall.onclick=activateRecall;
   document.getElementById('btnHorse').onclick=()=>act('horse');document.getElementById('btnCannon').onclick=()=>act('cannon');document.getElementById('btnElephant').onclick=()=>act('elephant');document.getElementById('btnAdvisor').onclick=()=>act('advisor');br.onclick=restart;
   function act(t){if(GO||!PT||!RP||RS[t]<=0)return;if(RECALLING)return;if(AA===t){AA=null;HC=[];ui();return}AA=t;HC=am(RP.row,RP.col,t).map(m=>({row:m.row,col:m.col,isCapture:m.cap}));ui()}
-  document.addEventListener('keydown',e=>{if(GO)return;const k=e.key.toLowerCase();if(k==='a'){e.preventDefault();act('horse')}if(k==='s'){e.preventDefault();act('cannon')}if(k==='d'){e.preventDefault();act('elephant')}if(k==='f'){e.preventDefault();act('advisor')}if(k==='r'){e.preventDefault();activateRecall()}if(k==='z'){e.preventDefault();if(RECALLING) return;AA=null;HC=[];ui()}});
+  document.addEventListener('keydown',e=>{if(GO||solving)return;const k=e.key.toLowerCase();if(k==='a'){e.preventDefault();act('horse')}if(k==='s'){e.preventDefault();act('cannon')}if(k==='d'){e.preventDefault();act('elephant')}if(k==='f'){e.preventDefault();act('advisor')}if(k==='r'){e.preventDefault();activateRecall()}if(k==='z'){e.preventDefault();if(RECALLING) return;AA=null;HC=[];ui()}});
   lh();sb(false);st();
 })();
 </script>
