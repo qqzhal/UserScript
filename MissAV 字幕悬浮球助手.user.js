@@ -286,6 +286,7 @@
         }
         .subtitle-content-viewer .viewer-drag-handle {
             cursor: move;
+            touch-action: none;
             padding-bottom: 10px;
             margin-bottom: 10px;
             border-bottom: 1px solid rgba(255, 255, 255, 0.1);
@@ -393,8 +394,6 @@
     let videoElement = null;
     let playerMonitorInterval = null;
     let hasShownPlayerReadyToast = false;
-    let subtitleTrack = null;
-    let subtitleTrackOwner = null;
     let playerBridgeState = {
         currentTime: 0,
         paused: true,
@@ -973,9 +972,13 @@
         };
         isBridgeActive = true;
 
-        const currentVideo = findVideoElement();
-        if (currentVideo) {
-            bindVideoElement(currentVideo);
+        // frame 事件每帧触发，只在绑定/轮询事件或视频丢失时重新查找播放器
+        if (detail.reason === 'bind' || detail.reason === 'poll'
+            || !videoElement || !videoElement.isConnected) {
+            const currentVideo = findVideoElement();
+            if (currentVideo) {
+                bindVideoElement(currentVideo);
+            }
         }
 
         updateSubtitle();
@@ -991,12 +994,6 @@
         injectPlayerBridge();
     }
 
-    function getCueConstructor() {
-        if (typeof VTTCue !== 'undefined') return VTTCue;
-        if (typeof TextTrackCue !== 'undefined') return TextTrackCue;
-        return null;
-    }
-
     function setSubtitleText(text) {
         if (!subtitleElement) return;
 
@@ -1005,21 +1002,6 @@
             subtitleElement.textContent = normalizedText;
         }
         subtitleElement.style.display = normalizedText ? 'block' : 'none';
-    }
-
-    function handleTrackCueChange() {
-        if (!subtitleTrack) {
-            setSubtitleText('');
-            return;
-        }
-
-        const activeText = Array
-            .from(subtitleTrack.activeCues || [])
-            .map((cue) => cue.text)
-            .filter(Boolean)
-            .join('\n');
-
-        setSubtitleText(activeText);
     }
 
     function positionSubtitleList() {
@@ -1066,64 +1048,7 @@
     }
 
     function clearSubtitleTrack() {
-        if (!subtitleTrack) return;
-
-        try {
-            subtitleTrack.removeEventListener('cuechange', handleTrackCueChange);
-            Array.from(subtitleTrack.cues || []).forEach((cue) => {
-                try {
-                    subtitleTrack.removeCue(cue);
-                } catch (error) {
-                    console.warn('Missav Script: Failed to remove cue.', error);
-                }
-            });
-        } catch (error) {
-            console.warn('Missav Script: Failed to clear subtitle track.', error);
-        }
-
-        subtitleTrack = null;
-        subtitleTrackOwner = null;
         setSubtitleText('');
-    }
-
-    function syncSubtitleTrack() {
-        if (!videoElement || !subtitles.length) {
-            clearSubtitleTrack();
-            return false;
-        }
-
-        const CueConstructor = getCueConstructor();
-        if (!CueConstructor) {
-            console.warn('Missav Script: VTTCue/TextTrackCue is not available, falling back to manual sync.');
-            return false;
-        }
-
-        if (!subtitleTrack || subtitleTrackOwner !== videoElement) {
-            clearSubtitleTrack();
-            subtitleTrack = videoElement.addTextTrack('subtitles', 'Missav Subtitle', 'zh');
-            subtitleTrack.mode = 'hidden';
-            subtitleTrack.addEventListener('cuechange', handleTrackCueChange);
-            subtitleTrackOwner = videoElement;
-        } else {
-            Array.from(subtitleTrack.cues || []).forEach((cue) => {
-                try {
-                    subtitleTrack.removeCue(cue);
-                } catch (error) {
-                    console.warn('Missav Script: Failed to reset cue.', error);
-                }
-            });
-        }
-
-        subtitles.forEach((sub) => {
-            const startTime = Math.max(0, sub.start);
-            const endTime = Math.max(startTime + 0.01, sub.end);
-            const cue = new CueConstructor(startTime, endTime, sub.text);
-            subtitleTrack.addCue(cue);
-        });
-
-        subtitleTrack.mode = 'hidden';
-        handleTrackCueChange();
-        return true;
     }
 
     function findVideoElement() {
@@ -1377,7 +1302,6 @@
             if (!videoContainer) {
                 clearInterval(waitForContainer);
                 console.error("Missav Script: Failed to find video container after 10 seconds.");
-                showToast("错误：无法找到视频容器挂载字幕", 5000);
             }
         }, 10000);
     }
@@ -1429,6 +1353,8 @@
                     subs.push({ start, end, text: textContent });
                 }
             }
+            // 按开始时间排序，保证字幕查找可以使用二分
+            subs.sort((a, b) => a.start - b.start || a.end - b.end);
             console.log(`Missav Script: Parsed ${subs.length} subtitle blocks.`);
             resolve(subs);
         });
@@ -1453,6 +1379,28 @@
         }
     }
 
+    function findSubtitleIndexAt(time) {
+        const count = subtitles.length;
+        if (count === 0 || !Number.isFinite(time)) return -1;
+
+        // 二分查找最后一个 start <= time 且 end >= time 的字幕
+        let low = 0;
+        let high = count - 1;
+        let result = -1;
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+            if (subtitles[mid].start <= time) {
+                if (subtitles[mid].end >= time) {
+                    result = mid;
+                }
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return result;
+    }
+
     function updateSubtitle() {
         if (!subtitleElement) return;
 
@@ -1471,8 +1419,8 @@
                 setSubtitleText('');
                 return;
             }
-            const currentSub = subtitles.find(sub => currentTime >= sub.start && currentTime <= sub.end);
-            setSubtitleText(currentSub ? currentSub.text : '');
+            const currentIndex = findSubtitleIndexAt(currentTime);
+            setSubtitleText(currentIndex >= 0 ? subtitles[currentIndex].text : '');
         } catch (e) {
             console.error("Error updating subtitle:", e);
         }
@@ -1506,7 +1454,6 @@
             if (attempts >= 30) {
                 clearInterval(checkPlayerInterval);
                 console.error('Missav Script: Failed to find HTML5 video after 15 seconds.');
-                showToast('错误：无法连接到播放器实例', 5000);
             }
         }, 500);
     }
@@ -1745,6 +1692,7 @@
 
         if (!subtitles || subtitles.length === 0) {
             contentDiv.innerHTML = '<div style="color:#aaa; padding: 20px; text-align:center;">暂无字幕内容</div>';
+            subtitleViewerElement._subtitleItems = [];
             return null;
         }
 
@@ -1781,6 +1729,7 @@
         });
         contentDiv.innerHTML = '';
         contentDiv.appendChild(ul);
+        subtitleViewerElement._subtitleItems = Array.from(ul.children);
         return ul;
     }
 
@@ -1804,26 +1753,20 @@
             : (videoElement ? videoElement.currentTime : NaN);
         if (!Number.isFinite(currentTime)) return;
 
-        let activeIndex = -1;
-        for (let i = 0; i < subtitles.length; i++) {
-            if (currentTime >= subtitles[i].start && currentTime <= subtitles[i].end) {
-                activeIndex = i;
-                break;
-            }
-        }
+        const activeIndex = findSubtitleIndexAt(currentTime);
+        if (activeIndex === lastActiveIndex) return;
 
-        const items = subtitleViewerElement.querySelectorAll('.subtitle-viewer-item');
-        items.forEach((item, idx) => {
-            if (idx === activeIndex) {
-                item.classList.add('current');
-            } else {
-                item.classList.remove('current');
-            }
-        });
+        const items = subtitleViewerElement._subtitleItems || [];
+        if (items[lastActiveIndex]) {
+            items[lastActiveIndex].classList.remove('current');
+        }
+        if (items[activeIndex]) {
+            items[activeIndex].classList.add('current');
+        }
+        lastActiveIndex = activeIndex;
 
         // 只有当前激活字幕变化时才处理滚动
-        if (activeIndex !== -1 && activeIndex !== lastActiveIndex) {
-            lastActiveIndex = activeIndex;
+        if (activeIndex !== -1) {
             const activeItem = items[activeIndex];
             if (activeItem) {
                 const scrollContainer = subtitleViewerElement.querySelector('.viewer-content');
@@ -1946,7 +1889,8 @@
         let isDragging = false;
         let startX, startY, initialRect;
 
-        dragHandle.onmousedown = (e) => {
+        dragHandle.addEventListener('pointerdown', (e) => {
+            if (e.button !== undefined && e.button !== 0) return;
             if (e.target === followBtn || e.target === closeBtn || followBtn.contains(e.target) || closeBtn.contains(e.target)) {
                 return;
             }
@@ -1958,24 +1902,27 @@
             viewer.style.margin = '0';
             startX = e.clientX - initialRect.left;
             startY = e.clientY - initialRect.top;
+            dragHandle.setPointerCapture?.(e.pointerId);
 
-            const onMouseMove = (me) => {
+            const onPointerMove = (me) => {
                 if (!isDragging) return;
                 viewer.style.left = `${me.clientX - startX}px`;
                 viewer.style.top = `${me.clientY - startY}px`;
             };
-            const onMouseUp = () => {
+            const onPointerUp = () => {
                 isDragging = false;
                 localStorage.setItem('missavSubtitleViewerPosition', JSON.stringify({
                     left: viewer.style.left,
                     top: viewer.style.top
                 }));
-                document.removeEventListener('mousemove', onMouseMove);
-                document.removeEventListener('mouseup', onMouseUp);
+                dragHandle.removeEventListener('pointermove', onPointerMove);
+                dragHandle.removeEventListener('pointerup', onPointerUp);
+                dragHandle.removeEventListener('pointercancel', onPointerUp);
             };
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', onMouseUp);
-        };
+            dragHandle.addEventListener('pointermove', onPointerMove);
+            dragHandle.addEventListener('pointerup', onPointerUp);
+            dragHandle.addEventListener('pointercancel', onPointerUp);
+        });
 
         // 设置时间更新监听，用于更新高亮和滚动
         if (timeUpdateHandler) {
@@ -1986,16 +1933,9 @@
                 requestAnimationFrame(updateSubtitleViewerHighlight);
             }
         };
+        // 后续绑定视频时 bindVideoElement 会自动挂载该监听，无需轮询等待
         if (videoElement) {
             videoElement.addEventListener('timeupdate', timeUpdateHandler);
-        } else {
-            // 稍后再试
-            const bindInterval = setInterval(() => {
-                if (videoElement) {
-                    videoElement.addEventListener('timeupdate', timeUpdateHandler);
-                    clearInterval(bindInterval);
-                }
-            }, 500);
         }
 
         // 首次高亮
@@ -2007,6 +1947,7 @@
     function refreshSubtitleViewer() {
         if (subtitleViewerElement && document.body.contains(subtitleViewerElement)) {
             buildSubtitleViewerContent();
+            lastActiveIndex = -1;
             if (isFollowScrollEnabled) {
                 updateSubtitleViewerHighlight();
             }
@@ -2125,13 +2066,23 @@
 
     observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
 
-    setTimeout(() => {
-        if (!initStarted) {
-            console.log("Missav Script: Fallback timer triggered, attempting initialization.");
+    let fallbackChecks = 0;
+    const fallbackInterval = setInterval(() => {
+        if (initStarted) {
+            clearInterval(fallbackInterval);
+            return;
+        }
+        fallbackChecks += 1;
+        if (findVideoElement()) {
+            clearInterval(fallbackInterval);
+            console.log("Missav Script: Fallback check found a player, running main script.");
             initStarted = true;
             observer.disconnect();
             initializeScript();
+        } else if (fallbackChecks >= 6) {
+            // 页面仍无视频时保持静默，等待 MutationObserver 捕获后续插入的播放器
+            clearInterval(fallbackInterval);
         }
-    }, 4000);
+    }, 5000);
 
 })();

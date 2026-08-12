@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub 时间格式化
 // @namespace    https://github.com/
-// @version      1.2.0
-// @description  将 GitHub 上 Pull Request 和 Issue 的相对时间显示为 YY-MM-DD HH:mm 格式
+// @version      1.4.0
+// @description  将 GitHub 上的时间显示为中文：今天内显示“x 分钟前 / x 小时前”，昨天及更早显示 MM-DD HH:mm，跨年显示 YY-MM-DD HH:mm
 // @match        https://github.com/*
 // @match        https://*.github.com/*
 // @grant        none
@@ -14,8 +14,7 @@
 
   const pad = (n) => String(n).padStart(2, '0');
 
-  function formatDate(iso) {
-    const date = new Date(iso);
+  function formatDate(date) {
     if (Number.isNaN(date.getTime())) {
       return null;
     }
@@ -28,6 +27,29 @@
     }
     const y = pad(date.getFullYear() % 100);
     return `${y}-${m}-${d} ${h}:${min}`;
+  }
+
+  function isToday(date) {
+    const now = new Date();
+    return (
+      date.getFullYear() === now.getFullYear() &&
+      date.getMonth() === now.getMonth() &&
+      date.getDate() === now.getDate()
+    );
+  }
+
+  function formatRelative(date) {
+    const diffMs = Date.now() - date.getTime();
+    const absSec = Math.abs(Math.floor(diffMs / 1000));
+    const suffix = diffMs >= 0 ? '前' : '后';
+    if (absSec < 60) {
+      return diffMs >= 0 ? '刚刚' : '马上';
+    }
+    const min = Math.floor(absSec / 60);
+    if (min < 60) {
+      return `${min} 分钟${suffix}`;
+    }
+    return `${Math.floor(min / 60)} 小时${suffix}`;
   }
 
   function freezeElement(el) {
@@ -58,8 +80,27 @@
     const iso = el.getAttribute('datetime');
     if (!iso) return;
 
-    const text = formatDate(iso);
+    const date = new Date(iso);
+    const text = formatDate(date);
     if (!text) return;
+
+    if (el.getAttribute('title') !== text) {
+      el.setAttribute('title', text);
+    }
+
+    if (isToday(date)) {
+      // 今天内显示中文相对时间，定时刷新以保持“分钟/小时”滚动更新。
+      const rel = formatRelative(date);
+      const root = el.shadowRoot;
+      const current = root
+        ? root.querySelector('[part="root"]')?.textContent
+        : el.textContent;
+      if (el.dataset.codexRel === rel && current === rel) return;
+      freezeElement(el);
+      setVisibleText(el, rel);
+      el.dataset.codexRel = rel;
+      return;
+    }
 
     const root = el.shadowRoot;
     const current = root
