@@ -21,6 +21,8 @@
 // @grant        GM.openInTab
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @inject-into  content
 // @connect      api-shoulei-ssl.xunlei.com
 // @connect      xunlei.com
@@ -416,6 +418,12 @@
     let lastActiveIndex = -1;
     let timeUpdateHandler = null;
 
+    // 历史记录：仅记录通过“本地字幕”加载的最近 5 个字幕文件
+    const SUBTITLE_HISTORY_KEY = 'missavSubtitleHistory';
+    const SUBTITLE_HISTORY_MAX = 5;
+    const SUBTITLE_HISTORY_MAX_SIZE = 1000 * 1024; // 单文件内容超过此大小不记录，避免撑爆存储
+    let subtitleFileHistory = historyLoad();
+
     // --- UI Elements ---
     let controlPanel;
     let subtitleElement;
@@ -430,6 +438,79 @@
         style.textContent = css;
         (document.head || document.documentElement).appendChild(style);
         return style;
+    }
+
+    // 优先使用油猴脚本自有的存储空间（GM_setValue），不占用网站 localStorage
+    function historySave(list) {
+        const json = JSON.stringify(list);
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(SUBTITLE_HISTORY_KEY, json);
+                return;
+            }
+        } catch (e) {}
+        try { localStorage.setItem(SUBTITLE_HISTORY_KEY, json); } catch (e) {}
+    }
+
+    function historyLoad() {
+        let list = [];
+        try {
+            if (typeof GM_getValue === 'function') {
+                const v = GM_getValue(SUBTITLE_HISTORY_KEY, '');
+                if (v) list = JSON.parse(v);
+            }
+        } catch (e) {}
+        if (Array.isArray(list) && list.length) {
+            return list.filter(h => h && h.name && h.content);
+        }
+        // 迁移旧版存于网站 localStorage 的历史记录
+        try {
+            const old = JSON.parse(localStorage.getItem(SUBTITLE_HISTORY_KEY) || '[]');
+            if (Array.isArray(old) && old.length) {
+                localStorage.removeItem(SUBTITLE_HISTORY_KEY);
+                const cleaned = old.filter(h => h && h.name && h.content);
+                historySave(cleaned);
+                return cleaned;
+            }
+        } catch (e) {}
+        return [];
+    }
+
+    // 返回 true 表示写入成功；localStorage 超限时返回 false 供调用方降级
+    function saveHistoryWithFallback() {
+        const json = JSON.stringify(subtitleFileHistory);
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(SUBTITLE_HISTORY_KEY, json);
+                return true;
+            }
+        } catch (e) {}
+        try {
+            localStorage.setItem(SUBTITLE_HISTORY_KEY, json);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function addToHistory(fileName, content) {
+        if (!fileName || !content || content.length > SUBTITLE_HISTORY_MAX_SIZE) return;
+        subtitleFileHistory = subtitleFileHistory.filter(h => h.name !== fileName);
+        subtitleFileHistory.unshift({
+            name: fileName,
+            content: content,
+            time: Date.now()
+        });
+        if (subtitleFileHistory.length > SUBTITLE_HISTORY_MAX) {
+            subtitleFileHistory.length = SUBTITLE_HISTORY_MAX;
+        }
+        if (!saveHistoryWithFallback()) {
+            // 存储空间不足：从最旧的一条开始丢弃
+            while (subtitleFileHistory.length > 1) {
+                subtitleFileHistory.pop();
+                if (saveHistoryWithFallback()) break;
+            }
+        }
     }
 
     function clamp(value, min, max) {
@@ -1236,7 +1317,8 @@
             createButton('在线搜索', searchSubtitleOnline2),
             createButton('清空字幕', clearSubtitles),
             createButton('保存设置', saveSettings),
-            createButton('查看字幕', () => viewSubtitleContent())
+            createButton('查看字幕', () => viewSubtitleContent()),
+            createButton('历史记录', showHistoryList),
         );
 
         const hideButton = createButton('收起面板', hideControlPanel);
@@ -1306,6 +1388,18 @@
         }, 10000);
     }
 
+    async function applyLocalSubtitleText(text, fileName, toastMessage) {
+        originalSubtitleText = text;
+        subtitles = await parseSRT(text);
+        clearSubtitleTrack();
+        updateSubtitle();
+        refreshSubtitleViewer();
+        if (subtitleList) closeSubtitleList();
+        showToast(toastMessage);
+        addToHistory(fileName, text);
+        viewSubtitleContent(); // 加载完成后自动打开预览窗口
+    }
+
     async function handleLocalSubtitleFile(event) {
         const file = event.target.files[0];
         if (!file) return;
@@ -1313,17 +1407,21 @@
 
         try {
             const text = await file.text();
-            originalSubtitleText = text;
-            subtitles = await parseSRT(text);
-            clearSubtitleTrack();
-            updateSubtitle();
-            refreshSubtitleViewer();
-            if (subtitleList) closeSubtitleList();
-            showToast('本地字幕加载成功');
-            viewSubtitleContent();// 加载完成后自动打开预览窗口
+            await applyLocalSubtitleText(text, file.name, '本地字幕加载成功');
         } catch (error) {
             console.error("Subtitle load error:", error);
             showToast(`本地字幕加载失败: ${error.message}`);
+            clearSubtitles();
+        }
+    }
+
+    async function loadSubtitleFromHistory(entry) {
+        if (!entry || !entry.content) return;
+        try {
+            await applyLocalSubtitleText(entry.content, entry.name, '历史字幕加载成功');
+        } catch (error) {
+            console.error("History subtitle load error:", error);
+            showToast(`历史字幕加载失败: ${error.message}`);
             clearSubtitles();
         }
     }
@@ -1576,20 +1674,30 @@
         });
     }
 
-    function showSubtitleList(items) {
+    function showHistoryList() {
+        const items = subtitleFileHistory.map(entry => ({
+            name: entry.name,
+            entry: entry
+        }));
+        showSubtitleList(items, '历史记录:', (item) => {
+            loadSubtitleFromHistory(item.entry);
+        }, '暂无历史记录');
+    }
+
+    function showSubtitleList(items, titleText, onSelect, emptyText) {
         closeSubtitleList();
 
         subtitleList = document.createElement('div');
         subtitleList.className = 'subtitle-list';
 
         const title = document.createElement('div');
-        title.textContent = '选择在线字幕:';
+        title.textContent = titleText || '选择在线字幕:';
         title.style.cssText = 'color:#ccc; margin-bottom:8px; font-weight: bold;';
         subtitleList.appendChild(title);
 
         if (items.length === 0) {
             const noSubs = document.createElement('div');
-            noSubs.textContent = '未找到相关字幕。';
+            noSubs.textContent = emptyText || '未找到相关字幕。';
             noSubs.style.padding = '5px';
             subtitleList.appendChild(noSubs);
         } else {
@@ -1600,7 +1708,11 @@
                 div.title = `点击加载: ${item.name}`;
                 div.onclick = (e) => {
                     e.stopPropagation();
-                    loadRemoteSubtitle(item.url);
+                    if (typeof onSelect === 'function') {
+                        onSelect(item);
+                    } else {
+                        loadRemoteSubtitle(item.url);
+                    }
                 };
                 subtitleList.appendChild(div);
             });
