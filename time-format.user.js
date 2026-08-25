@@ -1,14 +1,12 @@
 // ==UserScript==
 // @name         多站点时间格式化
 // @namespace    https://github.com/
-// @version      1.3.0
-// @description  将 GitHub、Reddit、Stack Overflow 等站点上的时间显示为中文：今天内显示“x 分钟前 / x 小时前”，昨天及更早显示 MM-DD HH:mm，跨年显示 YY-MM-DD HH:mm
-// @match        https://github.com/*
-// @match        https://*.github.com/*
-// @match        https://reddit.com/*
-// @match        https://*.reddit.com/*
-// @match        https://stackoverflow.com/*
-// @match        https://*.stackoverflow.com/*
+// @version      1.5.0
+// @description  将 GitHub、Reddit、Stack Overflow、Instagram 等站点上的时间显示为中文：今天内显示“x 分钟前 / x 小时前”，昨天及更早显示 MM-DD HH:mm，跨年显示 YY-MM-DD HH:mm
+// @match        *://*.github.com/*
+// @match        *://*.reddit.com/*
+// @match        *://*.stackoverflow.com/*
+// @match        *://*.instagram.com/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -17,13 +15,13 @@
   'use strict';
 
   // 新增站点时在这里追加一条规则：
-  // - hosts：站点域名，支持 “*.example.com” 匹配子域
+  // - hosts：站点域名，支持 “*.example.com” 同时匹配裸域 example.com 和任意子域
   // - selector：要替换的时间元素 CSS 选择器
   // - freeze / setText：按需覆盖元素冻结和文本写入方式
   const SITE_RULES = [
     {
       name: 'GitHub',
-      hosts: ['github.com', '*.github.com'],
+      hosts: ['*.github.com'],
       selector: 'relative-time, time-ago',
       freeze(el) {
         // 新版 relative-time 会把可见文本渲染在 Shadow DOM 里，并定时改回相对时间。
@@ -39,14 +37,14 @@
     },
     {
       name: 'Reddit',
-      hosts: ['reddit.com', '*.reddit.com'],
+      hosts: ['*.reddit.com'],
       selector: 'time[datetime]',
       // Reddit 的时间元素由 Lit 渲染，只更新文本节点以保留注释标记。
       setText: setElementText,
     },
     {
       name: 'Stack Overflow',
-      hosts: ['stackoverflow.com', '*.stackoverflow.com'],
+      hosts: ['*.stackoverflow.com'],
       selector:
         'time[itemprop="dateCreated"], time.s-user-card--time, .relativetime, .relative-time, .relativetime-clean, a[href="?lastactivity"]',
       getDateTime(el) {
@@ -63,6 +61,22 @@
         );
         // Stack Overflow 的 datetime 可能是 “2012-06-27 13:51:36Z”，转成标准 ISO 便于解析。
         return (iso ? iso[1] : raw).replace(' ', 'T');
+      },
+      setText: setElementText,
+    },
+    {
+      name: 'Instagram',
+      hosts: ['*.instagram.com'],
+      selector: 'time[datetime]',
+      getDateTime(el) {
+        // Instagram 的 time 元素带 title（如 “2026年8月20日”），
+        // 若无标准 datetime 则尝试从 title 解析完整时间。
+        const raw = el.getAttribute('datetime');
+        if (raw) return raw;
+        const title = el.getAttribute('title');
+        if (!title) return null;
+        // 尝试解析常见格式，若失败交给 new Date 兜底。
+        return title;
       },
       setText: setElementText,
     },
@@ -184,7 +198,9 @@
     const normalized = host.toLowerCase();
     if (pattern === normalized) return true;
     if (pattern.startsWith('*.')) {
-      return normalized.endsWith(pattern.slice(1));
+      // *.x.com 同时匹配裸域 x.com 和任意子域（与 @match 通配符行为一致）。
+      const base = pattern.slice(2);
+      return normalized === base || normalized.endsWith('.' + base);
     }
     return false;
   }
