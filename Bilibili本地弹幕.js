@@ -2263,7 +2263,7 @@
                             </div>
                             <input type="range" id="ldx-offset-slider" class="ldx-range" min="${MIN_FT_OFFSET}" max="${MAX_FT_OFFSET}" step="0.1" value="${fineTuneOffset}">
                             <div class="ldx-input-row">
-                                <input type="number" id="ldx-offset-input" class="ldx-input" step="0.1" value="${fineTuneOffset.toFixed(1)}">
+                                <input type="number" id="ldx-offset-input" class="ldx-input" step="0.5" value="${fineTuneOffset.toFixed(1)}">
                                 <button id="ldx-search-panel-toggle" class="ldx-btn ldx-btn-ghost" title="展开 / 收起搜索面板">搜弹幕</button>
                                 <button id="ldx-offset-reset" class="ldx-btn ldx-btn-reset">重置</button>
                             </div>
