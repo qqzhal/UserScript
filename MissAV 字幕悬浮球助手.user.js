@@ -3,8 +3,8 @@
 // @name:zh-CN   MissAV 字幕悬浮球助手
 // @namespace    https://greasyfork.org/scripts/missav-subtitle-ball
 // @version      1.4.0
-// @description  Add subtitle loading, appearance controls, online search, hotkeys, and a draggable floating-ball panel for MissAV and Jable. Added subtitle viewer auto-scroll feature.
-// @description:zh-CN 为 MissAV 与 Jable 提供本地字幕加载、字幕样式调节、在线字幕搜索、快捷键控制与可拖拽字幕悬浮球面板，字幕预览窗口支持跟随播放进度滚动。
+// @description  Add subtitle loading, appearance controls, online search, hotkeys, and a draggable floating-ball panel for MissAV and Jable. Added subtitle viewer auto-scroll feature and open-search-result-in-new-tab button.
+// @description:zh-CN 为 MissAV 与 Jable 提供本地字幕加载、字幕样式调节、在线字幕搜索、快捷键控制与可拖拽字幕悬浮球面板，字幕预览窗口支持跟随播放进度滚动，在线搜索结果可新窗口打开链接。
 // @author       时光Alex
 // @match        *://missav123.com/*
 // @match        *://missav.ws/*
@@ -209,6 +209,10 @@
             backdrop-filter: blur(10px);
         }
         .subtitle-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
             padding: 7px 8px;
             cursor: pointer;
             border-bottom: 1px solid rgba(255, 255, 255, 0.1);
@@ -216,6 +220,27 @@
             border-radius: 6px;
             margin-bottom: 4px;
             transition: all 0.2s ease;
+        }
+        .subtitle-item-text {
+            flex: 1;
+            min-width: 0;
+            word-break: break-all;
+        }
+        .subtitle-item-open-btn {
+            flex-shrink: 0;
+            background: rgba(100, 150, 255, 0.2);
+            border: 1px solid rgba(100, 150, 255, 0.4);
+            color: white;
+            padding: 2px 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            line-height: 1.4;
+            transition: all 0.2s ease;
+        }
+        .subtitle-item-open-btn:hover {
+            background: rgba(74, 144, 226, 0.6);
+            border-color: rgba(100, 150, 255, 0.7);
         }
         .subtitle-item:last-child {
             border-bottom: none;
@@ -1704,7 +1729,24 @@
             items.forEach(item => {
                 const div = document.createElement('div');
                 div.className = 'subtitle-item';
-                div.textContent = `${item.name}${item.extra_name ? ` (${item.extra_name})` : ''}`;
+
+                const textSpan = document.createElement('span');
+                textSpan.className = 'subtitle-item-text';
+                textSpan.textContent = `${item.name}${item.extra_name ? ` (${item.extra_name})` : ''}`;
+                div.appendChild(textSpan);
+
+                if (item.url) {
+                    const openBtn = document.createElement('button');
+                    openBtn.className = 'subtitle-item-open-btn';
+                    openBtn.textContent = '↗ 新窗口';
+                    openBtn.title = `在新窗口打开: ${item.url}`;
+                    openBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        openInNewTab(item.url);
+                    };
+                    div.appendChild(openBtn);
+                }
+
                 div.title = `点击加载: ${item.name}`;
                 div.onclick = (e) => {
                     e.stopPropagation();

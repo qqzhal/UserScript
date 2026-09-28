@@ -2255,7 +2255,7 @@
                         </div>
 
                         <div class="ldx-section" id="ldx-offset-controls">
-                            <div class="ldx-section-title" id="ldx-offset-title"><span class="ldx-ico">🎚</span><span class="ldx-title-text">精调偏移</span></div>
+                            <div class="ldx-section-title" id="ldx-offset-title"><span class="ldx-ico">🎛️</span><span class="ldx-title-text">精调偏移</span></div>
                             <!-- 总偏移已默认隐藏（hidden 类）：偏移输入框即当前总偏移，想恢复显示时去掉 hidden 即可 -->
                             <div class="ldx-display-row hidden">
                                 <span class="ldx-label">总偏移</span>
@@ -2263,15 +2263,15 @@
                             </div>
                             <input type="range" id="ldx-offset-slider" class="ldx-range" min="${MIN_FT_OFFSET}" max="${MAX_FT_OFFSET}" step="0.1" value="${fineTuneOffset}">
                             <div class="ldx-input-row">
-                                <input type="number" id="ldx-offset-input" class="ldx-input" step="0.5" value="${fineTuneOffset.toFixed(1)}">
+                                <input type="number" id="ldx-offset-input" class="ldx-input" step="1" value="${fineTuneOffset.toFixed(1)}">
                                 <button id="ldx-search-panel-toggle" class="ldx-btn ldx-btn-ghost" title="展开 / 收起搜索面板">搜弹幕</button>
                                 <button id="ldx-offset-reset" class="ldx-btn ldx-btn-reset">重置</button>
                             </div>
                             <div class="ldx-chip-grid">
                                 <button class="ldx-chip" id="ldx-offset-m5">-5s</button>
                                 <button class="ldx-chip" id="ldx-offset-p5">+5s</button>
-                                <button class="ldx-chip" id="ldx-offset-m05">-0.5s</button>
-                                <button class="ldx-chip" id="ldx-offset-p05">+0.5s</button>
+                                <button class="ldx-chip" id="ldx-offset-m05">-1s</button>
+                                <button class="ldx-chip" id="ldx-offset-p05">+1s</button>
                             </div>
                         </div>
 
@@ -2476,8 +2476,8 @@
             document.getElementById('ldx-offset-reset').addEventListener('click', () => updateFineTuneOffset(0.0));
             document.getElementById('ldx-offset-m5').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset - 5.0));
             document.getElementById('ldx-offset-p5').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset + 5.0));
-            document.getElementById('ldx-offset-m05').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset - 0.5));
-            document.getElementById('ldx-offset-p05').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset + 0.5));
+            document.getElementById('ldx-offset-m05').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset - 1.0));
+            document.getElementById('ldx-offset-p05').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset + 1.0));
 
             // ---------- 字号 ----------
             const fontMinusBtn = document.getElementById('ldx-font-minus');

@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         多站点时间格式化
 // @namespace    https://github.com/
-// @version      1.5.0
-// @description  将 GitHub、Reddit、Stack Overflow、Instagram 等站点上的时间显示为中文：今天内显示“x 分钟前 / x 小时前”，昨天及更早显示 MM-DD HH:mm，跨年显示 YY-MM-DD HH:mm
+// @version      1.7.0
+// @description  将 GitHub、Gitee、X (Twitter)、Reddit、Stack Overflow、Instagram 等站点上的时间显示为中文：今天内显示“x 分钟前 / x 小时前”，昨天及更早显示 MM-DD HH:mm，跨年显示 YY-MM-DD HH:mm
 // @match        *://*.github.com/*
 // @match        *://*.reddit.com/*
 // @match        *://*.stackoverflow.com/*
 // @match        *://*.instagram.com/*
+// @match        *://*.gitee.com/*
+// @match        *://*.x.com/*
+// @match        *://*.twitter.com/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -34,6 +37,35 @@
       setText(el, text) {
         setShadowRootText(el, text);
       },
+    },
+    {
+      name: 'Gitee',
+      hosts: ['*.gitee.com'],
+      // Gitee 的时间是 <span class="timeago" datetime="2024-08-07 23:20" title="2024-08-07 23:20:09 +0800">2年前</span>
+      selector: '.timeago, time[datetime], time.timeago, time[title]',
+      getDateTime(el) {
+        const raw =
+          el.dataset.codexIso ||
+          el.getAttribute('datetime') ||
+          el.getAttribute('title') ||
+          el.getAttribute('data-original-title');
+        if (!raw) return null;
+        // 带时区的标准 ISO（如 2024-08-07T23:20:08+08:00）原样交给 new Date 解析。
+        if (
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw) &&
+          /(Z|[+-]\d{2}:?\d{2})$/.test(raw)
+        ) {
+          return raw;
+        }
+        const m = raw.match(
+          /(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2}))?)?/
+        );
+        if (!m) return null;
+        // Gitee 的 “2024-08-07 23:20” 等非 ISO 写法补全为标准格式（无时区按本地时区）；
+        // 纯日期按本地零点处理，避免被当作 UTC 而偏移一天。
+        return `${m[1]}T${m[2] || '00:00'}:${m[3] || '00'}`;
+      },
+      setText: setElementText,
     },
     {
       name: 'Reddit',
@@ -78,6 +110,13 @@
         // 尝试解析常见格式，若失败交给 new Date 兜底。
         return title;
       },
+      setText: setElementText,
+    },
+    {
+      name: 'X (Twitter)',
+      hosts: ['*.x.com', '*.twitter.com'],
+      // X 的时间是 <time datetime="2026-08-25T14:43:04.000Z">8月25日</time>，标准 ISO，默认流程即可。
+      selector: 'time[datetime]',
       setText: setElementText,
     },
   ];
