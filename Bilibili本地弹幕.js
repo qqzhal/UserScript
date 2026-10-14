@@ -54,7 +54,7 @@
     // ==================== 历史弹幕文件（最近 5 个，同文件去重） ====================
     const FILE_HISTORY_KEY = 'ldx-file-history';
     const FILE_HISTORY_MAX = 5;
-    const FILE_HISTORY_MAX_SIZE = 1000 * 1024; // 单文件内容超过此大小（约 1000 KB）不记录，避免撑爆 localStorage，可自行微调
+    const FILE_HISTORY_MAX_SIZE = 1000 * 1024; // 仅无 GM 环境降级 localStorage 时生效的单文件上限；GM 存储配额大，不限制
     let historyMenu = null;
     let historyBtn = null;
 
@@ -128,7 +128,9 @@
     }
 
     function addToHistory(fileName, content, offset) {
-        if (!fileName || content.length > FILE_HISTORY_MAX_SIZE) return;
+        if (!fileName) return;
+        // 有 GM 存储时不限大小，大文件也能进历史；无 GM 降级 localStorage 时才限制，避免撑爆其 5MB 配额
+        if (typeof GM_setValue !== 'function' && content.length > FILE_HISTORY_MAX_SIZE) return;
         fileHistory = fileHistory.filter(h => h.name !== fileName);
         fileHistory.unshift({
             name: fileName,
@@ -1590,12 +1592,37 @@
         reader.readAsText(file, 'UTF-8');
     }
 
+    function sanitizeBrokenXml(xmlStr) {
+        // 部分录制工具（如 danmakus.com）导出的 XML 中，弹幕/SC 等文本含未转义的 < 和 &（常见于颜文字），会导致整个文档解析失败；只转义内容标签文本节点内的字符
+        return xmlStr.replace(/(<(d|sc|gift|guard)\b[^>]*>)([\s\S]*?)(<\/\2\s*>)/g, (m, open, tag, text, close) =>
+            open + text.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;').replace(/</g, '&lt;') + close
+        );
+    }
+
+    function parseXmlSafe(parser, xmlStr) {
+        const doc = parser.parseFromString(xmlStr, 'text/xml');
+        return doc.getElementsByTagName('parsererror').length ? null : doc;
+    }
+
     function parseXMLDanmaku(xmlStr) {
         danmakuList = [];
         nextDanmakuIndex = 0;
         danmakuCache.clear();
         const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(xmlStr, 'text/xml');
+        let xmlDoc = parseXmlSafe(parser, xmlStr);
+        if (!xmlDoc) {
+            xmlDoc = parseXmlSafe(parser, sanitizeBrokenXml(xmlStr));
+            if (xmlDoc) console.warn('[本地弹幕] 原始 XML 含未转义字符（如颜文字中的 <），已自动修复解析');
+        }
+        if (!xmlDoc) {
+            console.error('[本地弹幕] XML 解析失败，文件可能已损坏');
+            if (statusBadge) {
+                statusBadge.textContent = '解析失败';
+                statusBadge.classList.remove('ldx-loaded');
+            }
+            redrawDensityGraph();
+            return;
+        }
 
         // 1. 建立 Hash -> 真名 对照表
         const hashToUserMap = new Map();
@@ -2321,6 +2348,7 @@
                             <div class="ldx-link-row">
                                 <a class="ldx-link" href="https://danmubox.github.io/search" target="_blank" rel="noopener">弹幕盒子</a>
                                 <a class="ldx-link" href="https://ani.gamer.com.tw" target="_blank" rel="noopener">巴哈姆特</a>
+                                <a class="ldx-link" href="https://danmakus.com/search" target="_blank" rel="noopener">DANMAKUS</a>
                             </div>
                         </div>
                     </div>
@@ -2413,10 +2441,30 @@
                     return;
                 }
                 searchResults.style.display = 'block';
+                const addTip = (text) => {
+                    const tip = document.createElement('div');
+                    tip.className = 'ldx-search-item';
+                    tip.style.cursor = 'default';
+                    tip.textContent = text;
+                    searchResults.appendChild(tip);
+                };
+                if (matches.length > 50) {
+                    addTip(`共 ${matches.length} 条匹配，显示前 50 条`);
+                }
                 matches.slice(0, 50).forEach(dm => {
                     const div = document.createElement('div');
                     div.className = 'ldx-search-item';
-                    div.innerHTML = `<span class="ldx-search-time">[${formatTime(dm.time)}]</span>${dm.user ? `<span class="ldx-search-user">${dm.user}</span>` : ''}${dm.text}`;
+                    const time = document.createElement('span');
+                    time.className = 'ldx-search-time';
+                    time.textContent = `[${formatTime(dm.time)}]`;
+                    div.appendChild(time);
+                    if (dm.user) {
+                        const user = document.createElement('span');
+                        user.className = 'ldx-search-user';
+                        user.textContent = dm.user;
+                        div.appendChild(user);
+                    }
+                    div.appendChild(document.createTextNode(dm.text));
                     div.addEventListener('click', () => {
                         if (videoElement) {
                             videoElement.currentTime = dm.time + globalTimeOffset;
