@@ -43,7 +43,33 @@
     const PREVIEW_WINDOW_SECONDS = 1.0;
     // 弹幕滚动时长（秒）：合并弹幕按条数对数加成，跑得更慢、停留更久，可自行微调
     const DM_SCROLL_DURATION = 8.0;
-    const DM_MERGE_DURATION_BONUS = 6.0;
+    const DM_MERGE_DURATION_BONUS = 3.0; // 弹幕合并计数每翻一倍（x2→x4→x8…）额外增加的驻留秒数，调大则高合并档停留越久
+    const MAX_MERGE_DURATION = 45.0; // 合并弹幕的总驻留上限（秒），防止极端刷屏时永久霸屏
+    const MAX_SC_DURATION = 45.0;     // SC 总驻留上限，与合并弹幕一致
+    // SC 价格 → 驻留增量锚点表 [价格, 在默认滚动时长上增加的秒数]：常见档位锚定增量、档位间对数插值，
+    // 调整 DM_SCROLL_DURATION 时所有档位同步增减；2/30 元是高频小额档保持接近默认速度
+    const SC_PRICE_DURATION_BONUS_TABLE = [
+        [2, 0],
+        [30, 2],
+        [50, 5],
+        [100, 10],
+        [500, 22],
+        [1000, 30]
+    ];
+    // 礼物价格 → 驻留增量锚点表 [价格, 增量秒]：2 元以下小额海量礼物比默认更快（负增量），2 元回默认，高价逐渐放慢
+    const GIFT_PRICE_DURATION_BONUS_TABLE = [
+        [0.1, -3],
+        [1, -2],
+        [2, 0],
+        [10, 10],
+        [50, 20],
+        [100, 28],
+        [500, 36]
+    ];
+    const MIN_GIFT_DURATION = 3.0;      // 礼物滚动时长下限（秒），防止基准调小后小额礼物快到闪没
+    const MAX_GIFT_DURATION = 45.0;    // 礼物驻留上限，与合并/SC/上舰一致
+    const DM_GUARD_GLOW_PERIOD = 1.4;  // 舰长发光脉冲周期（秒），CSS 与 JS 共用，改时长时需保持列表对齐
+    const MAX_GUARD_DURATION = 45.0;   // 上舰驻留上限，与合并/SC 一致
 
     const DM_OFFSET_KEY = 'ldx-offset';
     const OFFSET_MEMORY_LIMIT = 5.0; // 偏移记忆阈值（秒）：绝对值在此范围内才跨视频沿用，超过则加载时重置为 0，可自行微调
@@ -178,6 +204,7 @@
     let cfgShowSender = false; // 显示发送者ID
     let cfgShowSC = true;      // 显示 SuperChat
     let cfgShowGift = false;   // 显示礼物
+    let cfgGiftMinPrice = 0;   // 屏蔽 N 元以下的礼物（0 = 不屏蔽），打开"显示礼物"开关时询问
     let cfgShowGuard = true;   // 显示舰长
     let cfgUserFormat = 1;     // 用户名显示格式：1=弹幕(用户名) 2=用户名:弹幕 3=弹幕-用户名 4=弹幕[用户名]
     try {
@@ -185,6 +212,8 @@
         if (typeof savedCfg.sender === 'boolean') cfgShowSender = savedCfg.sender;
         if (typeof savedCfg.sc === 'boolean') cfgShowSC = savedCfg.sc;
         if (typeof savedCfg.gift === 'boolean') cfgShowGift = savedCfg.gift;
+        const gmp = Number(savedCfg.giftMinPrice);
+        if (isFinite(gmp) && gmp >= 0) cfgGiftMinPrice = gmp;
         if (typeof savedCfg.guard === 'boolean') cfgShowGuard = savedCfg.guard;
         const uf = Number(savedCfg.userFormat);
         if (uf >= 1 && uf <= 4) cfgUserFormat = uf;
@@ -192,7 +221,7 @@
     function saveLiveCfg() {
         localStorage.setItem(LIVE_CFG_KEY, JSON.stringify({
             sender: cfgShowSender, sc: cfgShowSC, gift: cfgShowGift, guard: cfgShowGuard,
-            userFormat: cfgUserFormat
+            userFormat: cfgUserFormat, giftMinPrice: cfgGiftMinPrice
         }));
     }
 
@@ -356,9 +385,12 @@
         }
         .ldx-title { font-size: 15px; font-weight: 700; letter-spacing: 0.5px; line-height: 1.2; }
         .ldx-sub { font-size: 10.5px; color: #8a8fa3; margin-top: 2px; }
-        .ldx-status {
+        .ldx-status-wrap {
+            position: relative;
             margin-left: auto;
             flex-shrink: 0;
+        }
+        .ldx-status {
             font-size: 11px;
             font-weight: 600;
             color: #8a8fa3;
@@ -368,12 +400,37 @@
             border-radius: 999px;
             white-space: nowrap;
             transition: all 0.3s;
+            cursor: pointer;
         }
+        .ldx-status:hover { color: #fff; border-color: rgba(255, 255, 255, 0.25); }
         .ldx-status.ldx-loaded {
             color: #7be3a2;
             border-color: rgba(123, 227, 162, 0.35);
             background: rgba(46, 160, 91, 0.18);
         }
+        .ldx-status.ldx-loaded:hover {
+            border-color: rgba(123, 227, 162, 0.6);
+            box-shadow: 0 0 8px rgba(123, 227, 162, 0.25);
+        }
+        .ldx-stats-menu {
+            width: 126px;
+            left: 0;
+            right: auto;
+        }
+        .ldx-stats-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 10px;
+            font-size: 11.5px;
+            color: #cdd1e0;
+            cursor: default;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .ldx-stats-row:last-child { border-bottom: none; }
+        .ldx-stats-num { font-weight: 700; color: #fff; }
+        .ldx-stats-total { color: #7be3a2; }
+        .ldx-stats-total .ldx-stats-num { color: #7be3a2; }
         .ldx-history-wrap {
             position: relative;
             margin-left: 6px;
@@ -581,6 +638,19 @@
             color: #c6cad8;
         }
         .ldx-switch-row + .ldx-switch-row { border-top: 1px dashed rgba(255, 255, 255, 0.06); }
+        .ldx-gift-price-filter {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: auto;
+        }
+        .ldx-gift-price-filter .ldx-input {
+            width: 54px;
+            padding: 3px 6px;
+            font-size: 11.5px;
+            text-align: right;
+        }
+        .ldx-gift-price-unit { font-size: 11px; color: #8a8fa3; white-space: nowrap; }
 
         /* ---------- 输入框 ---------- */
         .ldx-input {
@@ -871,11 +941,37 @@
             font-size: 0.9em;
         }
         .ldx-dm.dm-type-guard {
-            color: #87cefa;
-            font-size: 0.9em;
-            border: 1px solid #87cefa;
+            --ldx-glow: #00c8ff;
+            color: #a8e6ff;
+            font-size: 1.25em;
+            font-weight: bold;
+            border: 1px solid rgba(0, 200, 255, 0.75);
+            background: rgba(0, 70, 130, 0.35);
             border-radius: 4px;
-            padding: 0 2px;
+            padding: 0 5px;
+            animation: ldx-scroll ${DM_SCROLL_DURATION}s linear, ldx-guard-glow ${DM_GUARD_GLOW_PERIOD}s ease-in-out infinite;
+        }
+        .ldx-dm.dm-guard-admiral {
+            --ldx-glow: #c06bff;
+            color: #e3ccff;
+            font-size: 1.45em;
+            border-color: rgba(192, 107, 255, 0.8);
+            background: rgba(80, 30, 140, 0.38);
+        }
+        .ldx-dm.dm-guard-governor {
+            --ldx-glow: #ffd700;
+            color: #fff3b8;
+            font-size: 1.65em;
+            border-color: rgba(255, 215, 0, 0.85);
+            background: rgba(140, 100, 0, 0.4);
+        }
+        @keyframes ldx-guard-glow {
+            0%, 100% {
+                text-shadow: 0 0 4px var(--ldx-glow), 0 0 10px var(--ldx-glow), 1px 1px 2px rgba(0, 0, 0, 0.9);
+            }
+            50% {
+                text-shadow: 0 0 8px var(--ldx-glow), 0 0 18px var(--ldx-glow), 0 0 32px var(--ldx-glow), 1px 1px 2px rgba(0, 0, 0, 0.9);
+            }
         }
         @keyframes ldx-scroll {
             from { transform: translateX(100vw) scale(var(--ldx-scale)); opacity: 1; }
@@ -1702,7 +1798,26 @@
                 const user = rawData?.sender_uinfo?.name || item.getAttribute('user') || "未知";
                 const giftName = item.getAttribute('giftname') || "礼物";
                 const count = item.getAttribute('giftcount') || "1";
-                if (!isNaN(time)) danmakuList.push({ time, text: `投喂了 ${giftName} x ${count}`, type: 'gift', user, count, shown: false });
+                // 礼物价格统一换算成元：录制源单位不统一——danmakus.com 金瓜子按千分之一元、银瓜子为免费货币、
+                // 上舰类已是元；录播姬则从 raw（B站GIFT报文）取，price 为千分之一元、coin_type=silver 为免费
+                let priceYuan = 0;
+                if (rawData && isFinite(rawData.price)) {
+                    priceYuan = rawData.coin_type === 'silver' ? 0 : rawData.price / 1000;
+                } else {
+                    const cointype = item.getAttribute('cointype') || '';
+                    const p = parseFloat(item.getAttribute('price'));
+                    if (isFinite(p)) {
+                        if (cointype === '金瓜子') priceYuan = p / 1000;
+                        else if (cointype === '银瓜子') priceYuan = 0;
+                        else priceYuan = p;
+                    }
+                }
+                // 部分录制工具（如 danmakus.com）把上舰记录为 gift（giftname=舰长/提督/总督），转成舰长事件走舰长样式
+                if (!isNaN(time) && (giftName === "舰长" || giftName === "提督" || giftName === "总督")) {
+                    danmakuList.push({ time, text: `成为了 ${giftName}`, type: 'guard', user, shown: false });
+                } else if (!isNaN(time)) {
+                    danmakuList.push({ time, text: `投喂了 ${giftName} x ${count}`, type: 'gift', user, count, priceYuan, shown: false });
+                }
             } catch (e) {}
         }
         for (let item of xmlDoc.getElementsByTagName('guard')) {
@@ -1918,11 +2033,39 @@
     }
 
     // ==================== 弹幕渲染 ====================
+    // 价格 → 驻留时长通用计算：锚点档位取驻留增量，档位之间对数插值，超过最大锚点按末段斜率外推，最后叠加默认时长并封顶
+    // SC 与礼物共用，各自传入锚点表与上限
+    function priceScrollDuration(price, table, cap) {
+        const p = parseFloat(price);
+        if (!isFinite(p)) return DM_SCROLL_DURATION + table[0][1];
+        let bonus = null;
+        if (p <= table[0][0]) {
+            bonus = table[0][1];
+        } else {
+            for (let i = 1; i < table.length; i++) {
+                if (p <= table[i][0]) {
+                    const [p1, b1] = table[i - 1];
+                    const [p2, b2] = table[i];
+                    bonus = b1 + Math.log(p / p1) / Math.log(p2 / p1) * (b2 - b1);
+                    break;
+                }
+            }
+            if (bonus === null) {
+                const [p1, b1] = table[table.length - 2];
+                const [p2, b2] = table[table.length - 1];
+                const slope = (b2 - b1) / Math.log(p2 / p1);
+                bonus = b2 + slope * Math.log(p / p2);
+            }
+        }
+        return Math.min(DM_SCROLL_DURATION + bonus, cap);
+    }
+
     function processDanmaku(dm, virtualDmTime) {
         if (!videoElement) return;
 
         if (dm.type === 'sc' && !cfgShowSC) return;
         if (dm.type === 'gift' && !cfgShowGift) return;
+        if (dm.type === 'gift' && cfgGiftMinPrice > 0 && (dm.priceYuan || 0) < cfgGiftMinPrice) return;
         if (dm.type === 'guard' && !cfgShowGuard) return;
 
         let displayText = dm.text;
@@ -1956,9 +2099,12 @@
             case 'gift':
                 displayText = `[🎁礼物] ${displayText}`;
                 break;
-            case 'guard':
-                displayText = `[🚀舰长] ${displayText}`;
+            case 'guard': {
+                // 按舰长等级区分前缀与样式：总督 > 提督 > 舰长
+                const tierIcon = dm.text.includes('总督') ? '👑总督' : dm.text.includes('提督') ? '🚢提督' : '🚀舰长';
+                displayText = `[${tierIcon}] ${displayText}`;
                 break;
+            }
         }
 
         // 繁体转简体（开关开启时）
@@ -1977,9 +2123,9 @@
                 let scale = 1.0 + Math.log10(1.2 * cacheEntry.count);
                 scale = Math.min(scale, MAX_SCALE);
                 el.style.setProperty('--ldx-scale', scale);
-                // 合并条数越多，动画越长，弹幕在屏幕上停留越久
-                const extraDuration = Math.log10(1 * cacheEntry.count) * DM_MERGE_DURATION_BONUS;
-                el.style.animationDuration = (DM_SCROLL_DURATION + extraDuration) + 's';
+                // 合并条数越多，动画越长，弹幕在屏幕上停留越久；log2 增长比 log10 陡，高合并数时驻留提升更明显
+                const extraDuration = Math.log2(cacheEntry.count) * DM_MERGE_DURATION_BONUS;
+                el.style.animationDuration = Math.min(DM_SCROLL_DURATION + extraDuration, MAX_MERGE_DURATION) + 's';
                 el.style.zIndex = 10 + cacheEntry.count;
                 el.style.textShadow = '1px 1px 3px black, 0 0 3px black';
                 return;
@@ -1988,6 +2134,23 @@
 
         const el = showDanmaku(displayText, dm.type);
         if (!el) return;
+
+        // SC / 礼物按金额决定滚动速度：小额默认，金额越高滚得越慢（驻留越久）
+        if (dm.type === 'sc') {
+            el.style.animationDuration = priceScrollDuration(dm.price, SC_PRICE_DURATION_BONUS_TABLE, MAX_SC_DURATION) + 's';
+        }
+        if (dm.type === 'gift') {
+            el.style.animationDuration = Math.max(MIN_GIFT_DURATION, priceScrollDuration(dm.priceYuan, GIFT_PRICE_DURATION_BONUS_TABLE, MAX_GIFT_DURATION)) + 's';
+        }
+        // 上舰按等级决定滚动速度：舰长默认，提督 3 倍时长，总督 5 倍，封顶与 SC 一致；
+        // 舰长是滚动+发光双动画，时长必须用列表逐一对应，否则发光周期会被一起拉长
+        if (dm.type === 'guard') {
+            let duration = DM_SCROLL_DURATION * 1;
+            if (dm.text.includes('总督')) duration = DM_SCROLL_DURATION * 5;
+            else if (dm.text.includes('提督')) duration = DM_SCROLL_DURATION * 3;
+            duration = Math.min(duration, MAX_GUARD_DURATION);
+            el.style.animationDuration = duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's';
+        }
 
         if (dm.type === 'danmaku') {
             danmakuCache.set(displayText, {
@@ -2060,6 +2223,11 @@
         dm.style.zIndex = 1;
 
         if (type === 'sc') dm.style.zIndex = 50;
+        if (type === 'guard') {
+            if (text.includes('👑')) dm.classList.add('dm-guard-governor');
+            else if (text.includes('🛡')) dm.classList.add('dm-guard-admiral');
+            dm.style.zIndex = 80;
+        }
 
         // 弹幕动画结束后释放轨道
         dm.addEventListener('animationend', () => {
@@ -2255,7 +2423,10 @@
                             <div class="ldx-title">本地弹幕</div>
                         <div class="ldx-sub">本地弹幕工具</div>
                         </div>
-                        <div class="ldx-status" id="ldx-status">未加载</div>
+                        <div class="ldx-status-wrap">
+                            <div class="ldx-status" id="ldx-status" title="点击查看弹幕统计">未加载</div>
+                            <div id="ldx-stats-menu" class="ldx-history-menu ldx-stats-menu"></div>
+                        </div>
                         <div class="ldx-history-wrap">
                             <button id="ldx-history-btn" class="ldx-history-btn" title="最近使用的弹幕文件">历史文件</button>
                             <div id="ldx-history-menu" class="ldx-history-menu"></div>
@@ -2314,6 +2485,10 @@
                             </div>
                             <div class="ldx-switch-row">
                                 <span>显示 礼物</span>
+                                <div class="ldx-gift-price-filter" id="ldx-gift-price-field" title="屏蔽该价格(元)以下的礼物，0 为不屏蔽，修改后立即生效">
+                                    <input type="number" id="ldx-gift-min-price" class="ldx-input" min="0" step="0.1" placeholder="0">
+                                    <span class="ldx-gift-price-unit">元起显示</span>
+                                </div>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-gift"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
@@ -2388,12 +2563,52 @@
             historyBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 historyMenu.classList.toggle('open');
+                if (statsMenu) statsMenu.classList.remove('open');
                 updateHistoryMenu();
             });
             document.addEventListener('click', () => {
                 if (historyMenu) historyMenu.classList.remove('open');
+                if (statsMenu) statsMenu.classList.remove('open');
             });
             updateHistoryMenu();
+
+            // ---------- 弹幕统计 ----------
+            const statsMenu = document.getElementById('ldx-stats-menu');
+            function updateStatsMenu() {
+                if (!statsMenu) return;
+                statsMenu.innerHTML = '';
+                if (!danmakuList.length) {
+                    statsMenu.innerHTML = '<div class="ldx-history-item ldx-history-empty">未加载弹幕</div>';
+                    return;
+                }
+                const counts = { danmaku: 0, sc: 0, guard: 0, gift: 0 };
+                for (const dm of danmakuList) {
+                    if (counts[dm.type] !== undefined) counts[dm.type]++;
+                }
+                const addRow = (label, num, cls) => {
+                    const row = document.createElement('div');
+                    row.className = 'ldx-stats-row' + (cls ? ' ' + cls : '');
+                    const left = document.createElement('span');
+                    left.textContent = label;
+                    const right = document.createElement('span');
+                    right.className = 'ldx-stats-num';
+                    right.textContent = String(num);
+                    row.appendChild(left);
+                    row.appendChild(right);
+                    statsMenu.appendChild(row);
+                };
+                addRow('总计', danmakuList.length, 'ldx-stats-total');
+                addRow('💬 弹幕', counts.danmaku);
+                addRow('👻 SC', counts.sc);
+                addRow('🚀 上舰', counts.guard);
+                addRow('🎁 礼物', counts.gift);
+            }
+            statusBadge.addEventListener('click', (e) => {
+                e.stopPropagation();
+                historyMenu.classList.remove('open');
+                statsMenu.classList.toggle('open');
+                updateStatsMenu();
+            });
 
             // ---------- 加载 ----------
             fileInput.onchange = (e) => loadFile(e.target.files[0]);
@@ -2500,7 +2715,26 @@
             updateUserFormatVisibility();
             showSc.addEventListener('change', (e) => { cfgShowSC = e.target.checked; saveLiveCfg(); triggerFullDanmakuReset(videoElement.currentTime); });
             showSender.addEventListener('change', (e) => { cfgShowSender = e.target.checked; saveLiveCfg(); updateUserFormatVisibility(); triggerFullDanmakuReset(videoElement.currentTime); });
-            showGift.addEventListener('change', (e) => { cfgShowGift = e.target.checked; saveLiveCfg(); triggerFullDanmakuReset(videoElement.currentTime); });
+            const giftMinPriceInput = document.getElementById('ldx-gift-min-price');
+            const giftPriceField = document.getElementById('ldx-gift-price-field');
+            giftMinPriceInput.value = String(cfgGiftMinPrice);
+            function updateGiftPriceVisibility() {
+                giftPriceField.style.display = cfgShowGift ? '' : 'none';
+            }
+            updateGiftPriceVisibility();
+            giftMinPriceInput.addEventListener('change', (e) => {
+                const n = parseFloat(e.target.value);
+                cfgGiftMinPrice = (isFinite(n) && n > 0) ? n : 0;
+                e.target.value = String(cfgGiftMinPrice);
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
+            showGift.addEventListener('change', (e) => {
+                cfgShowGift = e.target.checked;
+                updateGiftPriceVisibility();
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
             showGuard.addEventListener('change', (e) => { cfgShowGuard = e.target.checked; saveLiveCfg(); triggerFullDanmakuReset(videoElement.currentTime); });
             userFormatSelect.addEventListener('change', (e) => {
                 cfgUserFormat = parseInt(e.target.value, 10) || 1;
