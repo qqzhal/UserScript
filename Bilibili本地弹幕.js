@@ -53,18 +53,19 @@
         [30, 2],
         [50, 5],
         [100, 10],
-        [500, 22],
-        [1000, 30]
+        [500, 30],
+        [1000, 50],
     ];
     // 礼物价格 → 驻留增量锚点表 [价格, 增量秒]：2 元以下小额海量礼物比默认更快（负增量），2 元回默认，高价逐渐放慢
     const GIFT_PRICE_DURATION_BONUS_TABLE = [
         [0.1, -3],
         [1, -2],
         [2, 0],
-        [10, 10],
-        [50, 20],
-        [100, 28],
-        [500, 36]
+        [30, 2],
+        [50, 5],
+        [100, 10],
+        [500, 30],
+        [1000, 50],
     ];
     const MIN_GIFT_DURATION = 3.0;      // 礼物滚动时长下限（秒），防止基准调小后小额礼物快到闪没
     const MAX_GIFT_DURATION = 45.0;    // 礼物驻留上限，与合并/SC/上舰一致
@@ -937,8 +938,36 @@
             padding: 0 4px;
         }
         .ldx-dm.dm-type-gift {
-            color: #ffb6c1;
-            font-size: 0.9em;
+            color: #ffd0da;
+            font-size: 0.95em;
+            border: 1px solid rgba(255, 182, 193, 0.55);
+            background: rgba(190, 60, 110, 0.25);
+            border-radius: 4px;
+            padding: 0 4px;
+        }
+        /* 高价礼物分档发光放大（价格已归一为元）：≥120 起步，越高越强；复用舰长的发光脉冲动画 */
+        .ldx-dm.dm-gift-lux {
+            --ldx-glow: #ffb84d;
+            color: #ffd9a0;
+            font-size: 1.15em;
+            font-weight: bold;
+            border: 1px solid rgba(255, 184, 77, 0.7);
+            background: rgba(140, 80, 0, 0.3);
+            border-radius: 4px;
+            padding: 0 4px;
+            animation: ldx-scroll ${DM_SCROLL_DURATION}s linear, ldx-guard-glow ${DM_GUARD_GLOW_PERIOD}s ease-in-out infinite;
+        }
+        .ldx-dm.dm-gift-lux2 {
+            --ldx-glow: #ff9d2e;
+            font-size: 1.4em;
+            border-color: rgba(255, 157, 46, 0.85);
+            background: rgba(160, 80, 0, 0.35);
+        }
+        .ldx-dm.dm-gift-lux3 {
+            --ldx-glow: #ff6b00;
+            font-size: 1.8em;
+            border-color: rgba(255, 107, 0, 0.95);
+            background: rgba(180, 70, 0, 0.4);
         }
         .ldx-dm.dm-type-guard {
             --ldx-glow: #00c8ff;
@@ -2070,11 +2099,9 @@
 
         let displayText = dm.text;
 
-        // 舰长/提督/总督弹幕：无论显示用户开关是否开启，都追加 (用户名)，不参与通用格式选择
-        if (dm.type === 'guard' && dm.user) {
+        // 舰长/SC/礼物：无论显示用户开关是否开启，都追加 (用户名)，不参与通用格式选择
+        if ((dm.type === 'guard' || dm.type === 'sc' || dm.type === 'gift') && dm.user) {
             displayText = `${displayText}(${dm.user})`;
-        } else if (dm.type === 'sc' && dm.user){
-        	displayText = `${displayText}(${dm.user})`;
         } else if (cfgShowSender && dm.user) {
             switch (cfgUserFormat) {
                 case 2:
@@ -2140,14 +2167,26 @@
             el.style.animationDuration = priceScrollDuration(dm.price, SC_PRICE_DURATION_BONUS_TABLE, MAX_SC_DURATION) + 's';
         }
         if (dm.type === 'gift') {
-            el.style.animationDuration = Math.max(MIN_GIFT_DURATION, priceScrollDuration(dm.priceYuan, GIFT_PRICE_DURATION_BONUS_TABLE, MAX_GIFT_DURATION)) + 's';
+            // 高价礼物分档发光放大：≥120 / ≥500 / ≥1000 元逐级增强，层级抬到普通弹幕之上
+            const priceYuan = dm.priceYuan || 0;
+            let luxClass = null;
+            if (priceYuan >= 1000) luxClass = 'dm-gift-lux3';
+            else if (priceYuan >= 500) luxClass = 'dm-gift-lux2';
+            else if (priceYuan >= 120) luxClass = 'dm-gift-lux';
+            if (luxClass) {
+                el.classList.add(luxClass);
+                el.style.zIndex = 40;
+            }
+            const duration = Math.max(MIN_GIFT_DURATION, priceScrollDuration(dm.priceYuan, GIFT_PRICE_DURATION_BONUS_TABLE, MAX_GIFT_DURATION));
+            // 发光档是滚动+发光双动画，时长必须用列表逐一对应，否则发光周期会被一起拉长
+            el.style.animationDuration = luxClass ? duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's' : duration + 's';
         }
-        // 上舰按等级决定滚动速度：舰长默认，提督 3 倍时长，总督 5 倍，封顶与 SC 一致；
+        // 上舰按等级决定滚动速度：舰长 1.5 倍时长，提督 4 倍时长，总督 6 倍，封顶与 SC 一致；
         // 舰长是滚动+发光双动画，时长必须用列表逐一对应，否则发光周期会被一起拉长
         if (dm.type === 'guard') {
-            let duration = DM_SCROLL_DURATION * 1;
-            if (dm.text.includes('总督')) duration = DM_SCROLL_DURATION * 5;
-            else if (dm.text.includes('提督')) duration = DM_SCROLL_DURATION * 3;
+            let duration = DM_SCROLL_DURATION * 1.5;
+            if (dm.text.includes('总督')) duration = DM_SCROLL_DURATION * 6;
+            else if (dm.text.includes('提督')) duration = DM_SCROLL_DURATION * 4;
             duration = Math.min(duration, MAX_GUARD_DURATION);
             el.style.animationDuration = duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's';
         }
@@ -2223,6 +2262,7 @@
         dm.style.zIndex = 1;
 
         if (type === 'sc') dm.style.zIndex = 50;
+        if (type === 'gift') dm.style.zIndex = 20; // 礼物整体高于普通/低合并弹幕，低于舰长(30)/高价礼物(40)/SC(50)
         if (type === 'guard') {
             if (text.includes('👑')) dm.classList.add('dm-guard-governor');
             else if (text.includes('🛡')) dm.classList.add('dm-guard-admiral');
