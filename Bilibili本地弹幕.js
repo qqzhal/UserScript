@@ -12,6 +12,7 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @license      MIT
 // @run-at       document-idle
 // ==/UserScript==
@@ -78,56 +79,55 @@
     let fineTuneOffset = (!isNaN(savedOffsetInit) && Math.abs(savedOffsetInit) < OFFSET_MEMORY_LIMIT) ? savedOffsetInit : 0.0;
     let globalTimeOffset = fineTuneOffset;
 
-    // ==================== 历史弹幕文件（最近 5 个，同文件去重） ====================
-    const FILE_HISTORY_KEY = 'ldx-file-history';
+    // ==================== 历史弹幕文件（最近 5 个，同文件去重；索引与内容分键存储，启动只读索引） ====================
+    const FILE_HISTORY_INDEX_KEY = 'ldx-file-history-index';    // 索引：[{name, display, time, offset}]，KB 级，启动时读取
+    const FILE_HISTORY_CONTENT_PREFIX = 'ldx-file-hist-c:';     // 内容：每个文件独立键，点历史加载时才按需读取
     const FILE_HISTORY_MAX = 5;
     const FILE_HISTORY_MAX_SIZE = 1000 * 1024; // 仅无 GM 环境降级 localStorage 时生效的单文件上限；GM 存储配额大，不限制
     let historyMenu = null;
     let historyBtn = null;
 
-    // 优先使用油猴脚本自有的存储空间（GM_setValue），不占用网站 localStorage
-    function historySave(list) {
-        const json = JSON.stringify(list);
-        try {
-            if (typeof GM_setValue === 'function') {
-                GM_setValue(FILE_HISTORY_KEY, json);
-                return;
-            }
-        } catch (e) {}
-        try { localStorage.setItem(FILE_HISTORY_KEY, json); } catch (e) {}
-    }
+    const hasGMStorage = () => typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
 
+    function storageGet(key) {
+        if (hasGMStorage()) { try { return GM_getValue(key, ''); } catch (e) { return ''; } }
+        try { return localStorage.getItem(key) || ''; } catch (e) { return ''; }
+    }
+    // 返回 true 表示写入成功
+    function storageSet(key, value) {
+        if (hasGMStorage()) { try { GM_setValue(key, value); return true; } catch (e) {} }
+        try { localStorage.setItem(key, value); return true; } catch (e) { return false; }
+    }
+    function storageRemove(key) {
+        if (hasGMStorage()) { try { GM_deleteValue(key); } catch (e) {} }
+        try { localStorage.removeItem(key); } catch (e) {}
+    }
+    const contentKey = (name) => FILE_HISTORY_CONTENT_PREFIX + name;
+
+    // 启动只读轻量索引；旧版单键全量缓存（ldx-file-history）不做迁移，直接清理
     function historyLoad() {
-        let list = [];
         try {
-            if (typeof GM_getValue === 'function') {
-                const v = GM_getValue(FILE_HISTORY_KEY, '');
-                if (v) list = JSON.parse(v);
-            }
-        } catch (e) {}
-        if (list.length) return list;
-        // 迁移旧版存于网站 localStorage 的历史记录
-        try {
-            const old = JSON.parse(localStorage.getItem(FILE_HISTORY_KEY) || '[]');
-            if (old.length) {
-                localStorage.removeItem(FILE_HISTORY_KEY);
-                historySave(old);
-                return old;
-            }
+            const list = JSON.parse(storageGet(FILE_HISTORY_INDEX_KEY) || '[]');
+            if (Array.isArray(list)) return list;
         } catch (e) {}
         return [];
     }
+    function saveHistoryIndex() {
+        storageSet(FILE_HISTORY_INDEX_KEY, JSON.stringify(fileHistory));
+    }
+    function historyGetContent(name) {
+        return storageGet(contentKey(name));
+    }
 
     let fileHistory = historyLoad();
+    storageRemove('ldx-file-history'); // 清理旧版全量缓存键
     let currentHistoryName = null; // 当前加载的文件名，用于同步配对偏移
     let historySaveTimer = null;
 
-    // 调节偏移后延迟保存历史（避免滑块拖动时频繁序列化大文件内容）
+    // 调节偏移后延迟保存历史索引（索引 KB 级且不含内容，不再重新序列化大文件）
     function scheduleHistorySave() {
         clearTimeout(historySaveTimer);
-        historySaveTimer = setTimeout(() => {
-            saveHistoryWithFallback();
-        }, 500);
+        historySaveTimer = setTimeout(saveHistoryIndex, 500);
     }
 
     // 清洗录播姬文件名：录制-271628-20260804-195010-589-矿世奇才.xml -> 20260804-195010-矿世奇才.xml
@@ -137,43 +137,34 @@
         return cleaned;
     }
 
-    // 返回 true 表示写入成功；localStorage 超限时返回 false 供调用方降级
-    function saveHistoryWithFallback() {
-        const json = JSON.stringify(fileHistory);
-        try {
-            if (typeof GM_setValue === 'function') {
-                GM_setValue(FILE_HISTORY_KEY, json);
-                return true; // GM 存储空间大，通常静默成功
-            }
-        } catch (e) {}
-        try {
-            localStorage.setItem(FILE_HISTORY_KEY, json);
-            return true;
-        } catch (e) {
-            return false;
-        }
-    }
-
     function addToHistory(fileName, content, offset) {
         if (!fileName) return;
         // 有 GM 存储时不限大小，大文件也能进历史；无 GM 降级 localStorage 时才限制，避免撑爆其 5MB 配额
-        if (typeof GM_setValue !== 'function' && content.length > FILE_HISTORY_MAX_SIZE) return;
+        if (!hasGMStorage() && content.length > FILE_HISTORY_MAX_SIZE) return;
+        // 先写内容键（每文件独立，写坏/写不下时历史里不留无内容的条目）
+        if (!storageSet(contentKey(fileName), content)) {
+            // localStorage 空间不足：从最旧的一条开始丢弃腾位重试
+            while (fileHistory.length > 0) {
+                storageRemove(contentKey(fileHistory[fileHistory.length - 1].name));
+                fileHistory.pop();
+                if (storageSet(contentKey(fileName), content)) break;
+            }
+            if (!historyGetContent(fileName)) return;
+        }
+        // 同名去重时清掉旧内容键
+        if (fileHistory.some(h => h.name === fileName)) storageRemove(contentKey(fileName));
         fileHistory = fileHistory.filter(h => h.name !== fileName);
         fileHistory.unshift({
             name: fileName,
             display: cleanFileName(fileName),
-            content: content,
             time: Date.now(),
             offset: offset
         });
-        if (fileHistory.length > FILE_HISTORY_MAX) fileHistory.length = FILE_HISTORY_MAX;
-        if (!saveHistoryWithFallback()) {
-            // localStorage 空间不足：从最旧的一条开始丢弃
-            while (fileHistory.length > 1) {
-                fileHistory.pop();
-                if (saveHistoryWithFallback()) break;
-            }
+        if (fileHistory.length > FILE_HISTORY_MAX) {
+            // 淘汰超出上限的旧条目时，连带清掉其内容键
+            fileHistory.splice(FILE_HISTORY_MAX).forEach(h => storageRemove(contentKey(h.name)));
         }
+        saveHistoryIndex();
         updateHistoryMenu();
     }
 
@@ -191,7 +182,8 @@
             item.title = h.name;
             item.addEventListener('click', () => {
                 historyMenu.classList.remove('open');
-                loadXmlFromData(h.name, h.content, h.offset);
+                const content = historyGetContent(h.name);
+                if (content) loadXmlFromData(h.name, content, h.offset);
             });
             historyMenu.appendChild(item);
         });
