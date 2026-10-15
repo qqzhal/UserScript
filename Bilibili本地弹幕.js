@@ -161,9 +161,16 @@
     }
 
     // 清洗录播姬文件名：录制-271628-20260804-195010-589-矿世奇才.xml -> 20260804-195010-矿世奇才.xml
+    // 清洗 danmakus 文件名：第一个时间戳是下载时间，第二个是开播时间，取开播日期作前缀
+    // 1792060871817_1791907808000_标题_房间号_主播名.xml -> 261014_标题_房间号_主播名.xml
     function cleanFileName(name) {
         let cleaned = name.replace(/^录制-\d+-/, '');
         cleaned = cleaned.replace(/^(\d{8}-\d{6})-\d+-/, '$1-');
+        cleaned = cleaned.replace(/^\d{13}_(\d{13})_/, (_, start) => {
+            const d = new Date(Number(start));
+            const p = (n) => String(n).padStart(2, '0');
+            return String(d.getFullYear()).slice(2) + p(d.getMonth() + 1) + p(d.getDate()) + '_';
+        });
         return cleaned;
     }
 
@@ -1895,7 +1902,10 @@
                     const gLevel = giftName === "总督" ? 3 : (giftName === "提督" ? 2 : 1);
                     danmakuList.push({ time, text: guardText(gLevel), type: 'guard', level: gLevel, user, shown: false });
                 } else if (!isNaN(time)) {
-                    danmakuList.push({ time, text: `${giftName} x ${count}`, type: 'gift', user, count, priceYuan, shown: false });// 投喂了 
+                    const countNum = parseInt(count, 10);
+                    // 数量为 1 时不追加个数后缀
+                    const giftText = countNum > 1 ? `${giftName} x ${countNum}` : giftName;
+                    danmakuList.push({ time, text: giftText, type: 'gift', user, count, priceYuan, shown: false });// 投喂了 
                 }
             } catch (e) {}
         }
