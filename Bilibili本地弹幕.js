@@ -20,7 +20,7 @@
 (function() {
     'use strict';
 
-    console.log('%c[本地弹幕] 美化版 v1.1.0 已启动', 'color:#fb7299;font-weight:bold;');
+    console.log('%c[本地弹幕] 已启动', 'color:#fb7299;font-weight:bold;');
 
     // ==================== 状态与常量 ====================
     let danmakuList = [];
@@ -35,17 +35,34 @@
     let nextDanmakuIndex = 0;
 
     let danmakuCache = new Map();
-    const MERGE_DURATION = 30.0;
     // 轨道占用表：行号 -> 当前占用该轨道的弹幕数
     const trackOccupancy = new Map();
 
-    const MAX_SCALE = 2.5;
-    const MAX_PREVIEW_LINES = 10;
-    const PREVIEW_WINDOW_SECONDS = 1.0;
-    // 弹幕滚动时长（秒）：合并弹幕按条数对数加成，跑得更慢、停留更久，可自行微调
+    // ==================== 可调参数集中区（打开文件在此微调） ====================
+    // ---- 通用 ----
+    // 弹幕滚动时长（秒）：所有类型弹幕速度的基准，合并/SC/礼物/上舰均以此为底增减
     const DM_SCROLL_DURATION = 8.0;
-    const DM_MERGE_DURATION_BONUS = 3.0; // 弹幕合并计数每翻一倍（x2→x4→x8…）额外增加的驻留秒数，调大则高合并档停留越久
-    const MAX_MERGE_DURATION = 45.0; // 合并弹幕的总驻留上限（秒），防止极端刷屏时永久霸屏
+    // 同文本合并窗口（秒）：窗口内重复弹幕合并为 xN 计数，不再单独占屏
+    const MERGE_DURATION = 30.0;
+    // 合并计数每翻一倍（x2→x4→x8…）额外增加的驻留秒数，调大则高合并档停留越久
+    const DM_MERGE_DURATION_BONUS = 5;
+    // 合并弹幕字号放大上限（倍）= 1.0 + MERGE_SCALE_BONUS_TABLE 末档增量，两处需保持一致
+    const MAX_SCALE = 3.5;
+    // 合并条数 → 字号增量锚点表 [合并条数, 在基准 1.0 上增加的倍数]：2 条 +0.5 起步让合并一眼可辨，
+    // 档位间对数插值，调整锚点时整条曲线平滑过渡
+    const MERGE_SCALE_BONUS_TABLE = [
+        [2, 0.5],
+        [8, 1.0],
+        [10, 1.2],
+        [20, 1.8],
+        [50, 2.5],
+        [100, 3.0],
+        [10000, 8.5],//足够大的上边界
+    ];
+    // 合并弹幕的总驻留上限（秒），防止极端刷屏时永久霸屏
+    const MAX_MERGE_DURATION = 45.0;
+
+    // ---- SC ----
     const MAX_SC_DURATION = 45.0;     // SC 总驻留上限，与合并弹幕一致
     // SC 价格 → 驻留增量锚点表 [价格, 在默认滚动时长上增加的秒数]：常见档位锚定增量、档位间对数插值，
     // 调整 DM_SCROLL_DURATION 时所有档位同步增减；2/30 元是高频小额档保持接近默认速度
@@ -56,6 +73,7 @@
         [100, 10],
         [500, 30],
         [1000, 50],
+        [10000, 100],//足够大的上边界
     ];
     // 礼物价格 → 驻留增量锚点表 [价格, 增量秒]：2 元以下小额海量礼物比默认更快（负增量），2 元回默认，高价逐渐放慢
     const GIFT_PRICE_DURATION_BONUS_TABLE = [
@@ -67,11 +85,23 @@
         [100, 10],
         [500, 30],
         [1000, 50],
+        [10000, 100],//足够大的上边界
     ];
     const MIN_GIFT_DURATION = 3.0;      // 礼物滚动时长下限（秒），防止基准调小后小额礼物快到闪没
     const MAX_GIFT_DURATION = 45.0;    // 礼物驻留上限，与合并/SC/上舰一致
+
+    // ---- 上舰 ----
     const DM_GUARD_GLOW_PERIOD = 1.4;  // 舰长发光脉冲周期（秒），CSS 与 JS 共用，改时长时需保持列表对齐
     const MAX_GUARD_DURATION = 45.0;   // 上舰驻留上限，与合并/SC 一致
+
+    // ---- 偏移 / 字号 / 预览 ----
+    const MIN_FT_OFFSET = -60.0;       // 手动偏移范围下限（秒）
+    const MAX_FT_OFFSET = 60.0;        // 手动偏移范围上限（秒）
+    const DM_MIN_FONT_SIZE = 12;       // 弹幕字号范围
+    const DM_MAX_FONT_SIZE = 60;
+    const MAX_PREVIEW_LINES = 10;      // 进度条悬停预览的弹幕行数
+    const PREVIEW_WINDOW_SECONDS = 1.0; // 预览取弹幕的时间窗口（秒）
+    // ==================== 可调参数集中区结束 ====================
 
     const DM_OFFSET_KEY = 'ldx-offset';
     const OFFSET_MEMORY_LIMIT = 5.0; // 偏移记忆阈值（秒）：绝对值在此范围内才跨视频沿用，超过则加载时重置为 0，可自行微调
@@ -141,7 +171,9 @@
         if (!fileName) return;
         // 有 GM 存储时不限大小，大文件也能进历史；无 GM 降级 localStorage 时才限制，避免撑爆其 5MB 配额
         if (!hasGMStorage() && content.length > FILE_HISTORY_MAX_SIZE) return;
-        // 先写内容键（每文件独立，写坏/写不下时历史里不留无内容的条目）
+        // 先做同名去重：内容键以文件名生成，同名的新内容稍后直接覆盖写入，无需删除旧键
+        fileHistory = fileHistory.filter(h => h.name !== fileName);
+        // 写内容键（每文件独立，写坏/写不下时历史里不留无内容的条目）
         if (!storageSet(contentKey(fileName), content)) {
             // localStorage 空间不足：从最旧的一条开始丢弃腾位重试
             while (fileHistory.length > 0) {
@@ -151,9 +183,6 @@
             }
             if (!historyGetContent(fileName)) return;
         }
-        // 同名去重时清掉旧内容键
-        if (fileHistory.some(h => h.name === fileName)) storageRemove(contentKey(fileName));
-        fileHistory = fileHistory.filter(h => h.name !== fileName);
         fileHistory.unshift({
             name: fileName,
             display: cleanFileName(fileName),
@@ -183,44 +212,50 @@
             item.addEventListener('click', () => {
                 historyMenu.classList.remove('open');
                 const content = historyGetContent(h.name);
-                if (content) loadXmlFromData(h.name, content, h.offset);
+                if (content) {
+                    loadXmlFromData(h.name, content, h.offset);
+                } else {
+                    alert('该历史文件的缓存内容缺失，请从本地重新加载一次');
+                }
             });
             historyMenu.appendChild(item);
         });
     }
 
-    const MIN_FT_OFFSET = -60.0;
-    const MAX_FT_OFFSET = 60.0;
-
     // 直播弹幕显示开关（带记忆）
     const LIVE_CFG_KEY = 'ldx-live-cfg';
     let cfgShowSender = false; // 显示发送者ID
     let cfgShowSC = true;      // 显示 SuperChat
+    let cfgSCMinPrice = 0;     // 屏蔽 N 元以下的 SC（0 = 不屏蔽），SC 开关旁输入框设置
     let cfgShowGift = false;   // 显示礼物
     let cfgGiftMinPrice = 0;   // 屏蔽 N 元以下的礼物（0 = 不屏蔽），打开"显示礼物"开关时询问
     let cfgShowGuard = true;   // 显示舰长
+    let cfgGuardMinLevel = 1;  // 上舰显示级别下限：1=舰长及以上(全显) 2=提督及以上 3=仅总督，舰长开关旁下拉设置
     let cfgUserFormat = 1;     // 用户名显示格式：1=弹幕(用户名) 2=用户名:弹幕 3=弹幕-用户名 4=弹幕[用户名]
     try {
         const savedCfg = JSON.parse(localStorage.getItem(LIVE_CFG_KEY) || '{}');
         if (typeof savedCfg.sender === 'boolean') cfgShowSender = savedCfg.sender;
         if (typeof savedCfg.sc === 'boolean') cfgShowSC = savedCfg.sc;
+        const smp = Number(savedCfg.scMinPrice);
+        if (isFinite(smp) && smp >= 0) cfgSCMinPrice = smp;
         if (typeof savedCfg.gift === 'boolean') cfgShowGift = savedCfg.gift;
         const gmp = Number(savedCfg.giftMinPrice);
         if (isFinite(gmp) && gmp >= 0) cfgGiftMinPrice = gmp;
         if (typeof savedCfg.guard === 'boolean') cfgShowGuard = savedCfg.guard;
+        const gml = Number(savedCfg.guardMinLevel);
+        if (gml >= 1 && gml <= 3) cfgGuardMinLevel = gml;
         const uf = Number(savedCfg.userFormat);
         if (uf >= 1 && uf <= 4) cfgUserFormat = uf;
     } catch (e) {}
     function saveLiveCfg() {
         localStorage.setItem(LIVE_CFG_KEY, JSON.stringify({
             sender: cfgShowSender, sc: cfgShowSC, gift: cfgShowGift, guard: cfgShowGuard,
-            userFormat: cfgUserFormat, giftMinPrice: cfgGiftMinPrice
+            userFormat: cfgUserFormat, giftMinPrice: cfgGiftMinPrice, scMinPrice: cfgSCMinPrice,
+            guardMinLevel: cfgGuardMinLevel
         }));
     }
 
     const DM_FONT_SIZE_KEY = 'local-dm-font-size';
-    const DM_MIN_FONT_SIZE = 12;
-    const DM_MAX_FONT_SIZE = 60;
     let cfgDmFontSize = parseInt(localStorage.getItem(DM_FONT_SIZE_KEY)) || 20;
 
     // 弹幕字体颜色
@@ -644,6 +679,11 @@
             text-align: right;
         }
         .ldx-gift-price-unit { font-size: 11px; color: #8a8fa3; white-space: nowrap; }
+        .ldx-guard-level-filter .ldx-input {
+            width: 82px;
+            padding: 3px 4px;
+            font-size: 11.5px;
+        }
 
         /* ---------- 输入框 ---------- */
         .ldx-input {
@@ -772,7 +812,7 @@
         /* ---------- 搜索 ---------- */
         .ldx-search-row { display: flex; gap: 6px; }
         .ldx-search-results {
-            max-height: 130px;
+            max-height: 240px;
             overflow-y: auto;
             margin-top: 7px;
             border-radius: 9px;
@@ -806,6 +846,22 @@
             margin-right: 6px;
             font-size: 11px;
         }
+        .ldx-search-badge {
+            display: inline-block;
+            margin-right: 6px;
+            padding: 0 5px;
+            border-radius: 4px;
+            font-size: 10px;
+            line-height: 16px;
+            vertical-align: 1px;
+            white-space: nowrap;
+        }
+        /* 徽标配色与滚动弹幕各类型配色一致 */
+        .ldx-search-badge.sc { color: #ffe066; background: rgba(255, 165, 0, 0.28); }
+        .ldx-search-badge.gift { color: #ffd0da; background: rgba(190, 60, 110, 0.32); }
+        .ldx-search-badge.guard { color: #a8e6ff; background: rgba(0, 200, 255, 0.22); }
+        .ldx-search-badge.guard-admiral { color: #e3ccff; background: rgba(192, 107, 255, 0.25); }
+        .ldx-search-badge.guard-governor { color: #fff3b8; background: rgba(255, 215, 0, 0.25); }
 
         /* ---------- 字号 ---------- */
         .ldx-stepper {
@@ -996,7 +1052,8 @@
         }
         @keyframes ldx-scroll {
             from { transform: translateX(100vw) scale(var(--ldx-scale)); opacity: 1; }
-            to { transform: translateX(-100%) scale(var(--ldx-scale)); opacity: 1; }
+            /* 终点位移需乘缩放系数：-100% 只抵消未缩放的布局宽度，高倍弹幕会在右边缘仍留在屏幕内时被移除，表现为提前消失 */
+            to { transform: translateX(calc(var(--ldx-scale) * -100%)) scale(var(--ldx-scale)); opacity: 1; }
         }
 
         /* ---------- 密度图 / 预览 ---------- */
@@ -1835,9 +1892,10 @@
                 }
                 // 部分录制工具（如 danmakus.com）把上舰记录为 gift（giftname=舰长/提督/总督），转成舰长事件走舰长样式
                 if (!isNaN(time) && (giftName === "舰长" || giftName === "提督" || giftName === "总督")) {
-                    danmakuList.push({ time, text: `成为了 ${giftName}`, type: 'guard', user, shown: false });
+                    const gLevel = giftName === "总督" ? 3 : (giftName === "提督" ? 2 : 1);
+                    danmakuList.push({ time, text: guardText(gLevel), type: 'guard', level: gLevel, user, shown: false });
                 } else if (!isNaN(time)) {
-                    danmakuList.push({ time, text: `投喂了 ${giftName} x ${count}`, type: 'gift', user, count, priceYuan, shown: false });
+                    danmakuList.push({ time, text: `${giftName} x ${count}`, type: 'gift', user, count, priceYuan, shown: false });// 投喂了 
                 }
             } catch (e) {}
         }
@@ -1847,8 +1905,9 @@
                 const rawData = safeJSONParse(item.getAttribute('raw'));
                 const user = rawData?.username || item.getAttribute('user') || "未知";
                 const level = item.getAttribute('level');
-                const levelName = level === "1" ? "总督" : (level === "2" ? "提督" : "舰长");
-                if (!isNaN(time)) danmakuList.push({ time, text: `成为了 ${levelName}`, type: 'guard', user, shown: false });
+                // B站 level 属性 1=总督 2=提督 3=舰长，映射为内部枚举（1 舰长/2 提督/3 总督，越大越高）
+                const lv = level === "1" ? 3 : (level === "2" ? 2 : 1);
+                if (!isNaN(time)) danmakuList.push({ time, text: guardText(lv), type: 'guard', level: lv, user, shown: false });
             } catch (e) {}
         }
 
@@ -1899,7 +1958,8 @@
         }
 
         redrawDensityGraph();
-        triggerFullDanmakuReset(videoElement.currentTime);
+        // 偏移调整走软重置：在飞弹幕继续飘完，新弹幕按新偏移调度，拖滑块不闪屏
+        softDanmakuReset(videoElement.currentTime);
     }
 
     function updateGlobalOffsetDisplay() {
@@ -1915,17 +1975,24 @@
         }
     }
 
-    function triggerFullDanmakuReset(currentTime) {
+    // 软重置：只重排调度指针，不清屏——在飞弹幕作为旧时间段残影自然消散
+    function softDanmakuReset(currentTime) {
         if (!danmakuList.length) return;
-        if (danmakuOverlay) { danmakuOverlay.innerHTML = ''; }
-        danmakuCache.clear();
-        trackOccupancy.clear();
         const targetTime = currentTime - globalTimeOffset;
         const firstIndex = binarySearchDanmakuIndex(targetTime);
         nextDanmakuIndex = (firstIndex === -1) ? danmakuList.length : firstIndex;
         for (let i = 0; i < danmakuList.length; i++) {
             danmakuList[i].shown = (i < nextDanmakuIndex);
         }
+    }
+
+    // 硬重置：清屏 + 软重置，用于 seek / 播放器重建 / 显示参数变化等需要彻底重排的场景
+    function triggerFullDanmakuReset(currentTime) {
+        if (!danmakuList.length) return;
+        if (danmakuOverlay) { danmakuOverlay.innerHTML = ''; }
+        danmakuCache.clear();
+        trackOccupancy.clear();
+        softDanmakuReset(currentTime);
     }
 
     // ==================== 播放器监听 ====================
@@ -1998,6 +2065,7 @@
         });
 
         videoElement.addEventListener('seeked', () => {
+            // seek 一律清屏重排：软重置试验过（残影+新弹幕两代同屏、加速波观感混乱），回退为硬清
             triggerFullDanmakuReset(videoElement.currentTime);
         });
 
@@ -2081,19 +2149,57 @@
         return Math.min(DM_SCROLL_DURATION + bonus, cap);
     }
 
+    // 合并条数 → 字号比例：锚点档位取 MERGE_SCALE_BONUS_TABLE 增量，档位间对数插值，
+    // 达到最大锚点（100 条）即为 MAX_SCALE，不再继续放大
+    function mergeScale(count) {
+        const table = MERGE_SCALE_BONUS_TABLE;
+        if (!isFinite(count) || count <= 1) return 1.0;
+        if (count >= table[table.length - 1][0]) return MAX_SCALE;
+        let bonus = table[0][1];
+        for (let i = 1; i < table.length; i++) {
+            if (count <= table[i][0]) {
+                const [c1, b1] = table[i - 1];
+                const [c2, b2] = table[i];
+                bonus = b1 + Math.log(count / c1) / Math.log(c2 / c1) * (b2 - b1);
+                break;
+            }
+        }
+        return Math.min(1.0 + bonus, MAX_SCALE);
+    }
+
+    // ---- 上舰等级 ----
+    // 内部等级枚举：1 舰长 / 2 提督 / 3 总督（数值越大等级越高，便于 minLevel 过滤比较）；
+    // 注意与 B站 guard XML 的 level 属性相反（B站 1=总督 2=提督 3=舰长），解析处已做映射。
+    // 上舰记录文本统一由 guardText 生成（改措辞只动这一个函数），等级信息一律读条目的 level 字段；
+    // guardLevel 仅作为 level 字段缺失时的文本兜底解析，新代码不要直接 includes 上舰文本
+    function guardText(level) {
+        return '' + (level === 3 ? '总督' : level === 2 ? '提督' : '舰长');// 开通了 
+    }
+    // 等级 → 屏显前缀图标；showDanmaku 的样式分支依赖这里的 emoji，改图标需同步该处判断
+    function guardIcon(level) {
+        return level === 3 ? '👑' : level === 2 ? '🚢' : '🚀';
+    }
+    function guardLevel(text) {
+        if (text.includes('总督')) return 3;
+        if (text.includes('提督')) return 2;
+        return 1;
+    }
+
     function processDanmaku(dm, virtualDmTime) {
         if (!videoElement) return;
 
         if (dm.type === 'sc' && !cfgShowSC) return;
+        if (dm.type === 'sc' && cfgSCMinPrice > 0 && (parseFloat(dm.price) || 0) < cfgSCMinPrice) return;
         if (dm.type === 'gift' && !cfgShowGift) return;
         if (dm.type === 'gift' && cfgGiftMinPrice > 0 && (dm.priceYuan || 0) < cfgGiftMinPrice) return;
         if (dm.type === 'guard' && !cfgShowGuard) return;
+        if (dm.type === 'guard' && (dm.level || guardLevel(dm.text)) < cfgGuardMinLevel) return;
 
         let displayText = dm.text;
 
         // 舰长/SC/礼物：无论显示用户开关是否开启，都追加 (用户名)，不参与通用格式选择
         if ((dm.type === 'guard' || dm.type === 'sc' || dm.type === 'gift') && dm.user) {
-            displayText = `${displayText}(${dm.user})`;
+            displayText = `${displayText} (${dm.user})`;
         } else if (cfgShowSender && dm.user) {
             switch (cfgUserFormat) {
                 case 2:
@@ -2119,9 +2225,9 @@
                 displayText = `[🎁礼物] ${displayText}`;
                 break;
             case 'guard': {
-                // 按舰长等级区分前缀与样式：总督 > 提督 > 舰长
-                const tierIcon = dm.text.includes('总督') ? '👑总督' : dm.text.includes('提督') ? '🚢提督' : '🚀舰长';
-                displayText = `[${tierIcon}] ${displayText}`;
+                // 前缀固定为"图标+上舰"，正文文案由 guardText 维护（guardIcon 的 emoji 是 showDanmaku 样式分支的判断依据）
+                const gLv = dm.level || guardLevel(dm.text);
+                displayText = `[${guardIcon(gLv)}上舰] ${displayText}`;
                 break;
             }
         }
@@ -2139,9 +2245,7 @@
                 cacheEntry.lastTime = now;
                 const el = cacheEntry.element;
                 el.textContent = displayText + ` (x${cacheEntry.count})`;
-                let scale = 1.0 + Math.log10(1.2 * cacheEntry.count);
-                scale = Math.min(scale, MAX_SCALE);
-                el.style.setProperty('--ldx-scale', scale);
+                el.style.setProperty('--ldx-scale', mergeScale(cacheEntry.count));
                 // 合并条数越多，动画越长，弹幕在屏幕上停留越久；log2 增长比 log10 陡，高合并数时驻留提升更明显
                 const extraDuration = Math.log2(cacheEntry.count) * DM_MERGE_DURATION_BONUS;
                 el.style.animationDuration = Math.min(DM_SCROLL_DURATION + extraDuration, MAX_MERGE_DURATION) + 's';
@@ -2173,12 +2277,12 @@
             // 发光档是滚动+发光双动画，时长必须用列表逐一对应，否则发光周期会被一起拉长
             el.style.animationDuration = luxClass ? duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's' : duration + 's';
         }
-        // 上舰按等级决定滚动速度：舰长 1.5 倍时长，提督 4 倍时长，总督 6 倍，封顶与 SC 一致；
+        // 上舰按等级决定滚动速度：舰长 1.5 倍时长，提督 6 倍时长，总督 10 倍，超出 MAX_GUARD_DURATION 的部分被封顶截断；
         // 舰长是滚动+发光双动画，时长必须用列表逐一对应，否则发光周期会被一起拉长
         if (dm.type === 'guard') {
             let duration = DM_SCROLL_DURATION * 1.5;
-            if (dm.text.includes('总督')) duration = DM_SCROLL_DURATION * 6;
-            else if (dm.text.includes('提督')) duration = DM_SCROLL_DURATION * 4;
+            if (dm.text.includes('总督')) duration = DM_SCROLL_DURATION * 10;
+            else if (dm.text.includes('提督')) duration = DM_SCROLL_DURATION * 6;
             duration = Math.min(duration, MAX_GUARD_DURATION);
             el.style.animationDuration = duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's';
         }
@@ -2256,9 +2360,10 @@
         if (type === 'sc') dm.style.zIndex = 50;
         if (type === 'gift') dm.style.zIndex = 20; // 礼物整体高于普通/低合并弹幕，低于舰长(30)/高价礼物(40)/SC(50)
         if (type === 'guard') {
-            if (text.includes('👑')) dm.classList.add('dm-guard-governor');
-            else if (text.includes('🛡')) dm.classList.add('dm-guard-admiral');
-            dm.style.zIndex = 80;
+            // 样式与 z-index 按等级分支：判断的 emoji 必须与 guardIcon 生成的前缀一致；z-index 递增保证高等级盖住低等级
+            if (text.includes('👑')) { dm.classList.add('dm-guard-governor'); dm.style.zIndex = 84; }
+            else if (text.includes('🚢')) { dm.classList.add('dm-guard-admiral'); dm.style.zIndex = 82; }
+            else dm.style.zIndex = 80;
         }
 
         // 弹幕动画结束后释放轨道
@@ -2325,6 +2430,33 @@
             const barHeight = Math.max(2, relativeHeight * height);
             ctx.fillRect(i, height - barHeight, 1, barHeight);
         }
+    }
+
+    // 确保密度图 canvas 挂在当前有效的进度条容器上：B站切换视频会重建进度条容器，旧 canvas 随之游离出
+    // 页面，重绘会画在不可见的画布上导致热点图"消失"；失连时刷新容器引用、重建画布并重挂尺寸观察器
+    function ensureDensityCanvas() {
+        if (!progressContainer || !progressContainer.isConnected) {
+            progressContainer = document.querySelector('.bpx-player-progress-wrap');
+        }
+        if (!progressContainer || !progressContainer.isConnected) return;
+        if (densityCanvas && densityCanvas.isConnected && densityCanvas.parentElement === progressContainer) return;
+        if (densityCanvas) densityCanvas.remove();
+        densityCanvas = document.createElement('canvas');
+        densityCanvas.id = 'ldx-density-canvas';
+        const rect = progressContainer.getBoundingClientRect();
+        densityCanvas.width = rect.width;
+        densityCanvas.height = 30;
+        progressContainer.appendChild(densityCanvas);
+        const resizeObserver = new ResizeObserver(entries => {
+            for (let entry of entries) {
+                const rect = entry.contentRect;
+                densityCanvas.width = rect.width;
+                densityCanvas.height = 30;
+                redrawDensityGraph();
+            }
+        });
+        resizeObserver.observe(progressContainer);
+        if (danmakuList.length > 0) redrawDensityGraph();
     }
 
     function handleProgressHover(event) {
@@ -2477,7 +2609,7 @@
                             <div class="ldx-section-title"><span class="ldx-ico">🔍</span><span class="ldx-title-text">搜索弹幕 · 定点对齐</span></div>
                             <div class="ldx-search-body" id="ldx-search-body">
                                 <div class="ldx-search-row">
-                                    <input type="text" id="ldx-search-input" class="ldx-input" placeholder="输入弹幕内容搜索...">
+                                    <input type="text" id="ldx-search-input" class="ldx-input" placeholder="输入弹幕内容搜索..." autocomplete="off">
                                     <button id="ldx-search-btn" class="ldx-btn ldx-btn-green">搜索</button>
                                 </div>
                                 <div id="ldx-search-results" class="ldx-search-results"></div>
@@ -2508,7 +2640,11 @@
                         <div class="ldx-section" id="ldx-live-controls">
                             <div class="ldx-section-title"><span class="ldx-ico">📺</span><span class="ldx-title-text">直播录播设置</span></div>
                             <div class="ldx-switch-row">
-                                <span>显示 SuperChat</span>
+                                <span>显示 SC</span>
+                                <div class="ldx-gift-price-filter" id="ldx-sc-price-field" title="屏蔽该价格(元)以下的SC，0 为不屏蔽，修改后立即生效">
+                                    <input type="number" id="ldx-sc-min-price" class="ldx-input" min="0" step="1" placeholder="0">
+                                    <span class="ldx-gift-price-unit">元起显示</span>
+                                </div>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-sc"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
@@ -2525,6 +2661,13 @@
                             </div>
                             <div class="ldx-switch-row">
                                 <span>显示 舰长</span>
+                                <div class="ldx-guard-level-filter ldx-gift-price-filter" id="ldx-guard-level-field" title="只显示该级别及以上的上舰，修改后立即生效">
+                                    <select id="ldx-guard-min-level" class="ldx-input">
+                                        <option value="1">舰长+</option>
+                                        <option value="2">提督+</option>
+                                        <option value="3">总督+</option>
+                                    </select>
+                                </div>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-guard"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-field" id="ldx-user-format-field">
@@ -2664,6 +2807,7 @@
             });
 
             // ---------- 搜索 ----------
+            let lastSearchMatches = [];
             function performDanmakuSearch() {
                 const query = searchInput.value.trim();
                 searchResults.innerHTML = '';
@@ -2676,11 +2820,16 @@
                     searchResults.innerHTML = '<div class="ldx-search-item" style="cursor:default">暂无弹幕数据</div>';
                     return;
                 }
-                // 同时匹配弹幕文本与用户名
+                // 同时匹配弹幕文本与用户名；SC/礼物/上舰记录的正文不含类型字样（类型前缀是显示时才拼接的），
+                // 因此这几个类型词按类型附加命中，避免"搜 SC/礼物/上舰 出不了记录"
                 const matches = danmakuList.filter(d => {
                     if (!d.text) return false;
                     if (d.text.includes(query)) return true;
-                    return !!(d.user && d.user.includes(query));
+                    if (d.user && d.user.includes(query)) return true;
+                    if (query === '上舰' && d.type === 'guard') return true;
+                    //if (query.toLowerCase() === 'sc' && d.type === 'sc') return true;
+                    //if (query === '礼物' && d.type === 'gift') return true;
+                    return false;
                 });
                 if (matches.length === 0) {
                     searchResults.style.display = 'block';
@@ -2695,16 +2844,37 @@
                     tip.textContent = text;
                     searchResults.appendChild(tip);
                 };
-                if (matches.length > 50) {
-                    addTip(`共 ${matches.length} 条匹配，显示前 50 条`);
-                }
-                matches.slice(0, 50).forEach(dm => {
+                addTip(`共 ${matches.length} 条匹配`);
+                // 特殊弹幕在结果中加类型徽标便于区分，普通弹幕不显示
+                const badgeFor = (dm) => {
+                    if (dm.type === 'sc') return ['sc', `SC ￥${dm.price}`];
+                    if (dm.type === 'gift') return ['gift', '礼物'];
+                    if (dm.type === 'guard') {
+                        const lv = dm.level || guardLevel(dm.text);
+                        if (lv === 3) return ['guard-governor', '总督'];
+                        if (lv === 2) return ['guard-admiral', '提督'];
+                        return ['guard', '舰长'];
+                    }
+                    return null;
+                };
+                // 全量渲染：Fragment 一次性插入 + 容器事件委托，几千条结果也不会卡
+                lastSearchMatches = matches;
+                const frag = document.createDocumentFragment();
+                matches.forEach((dm, idx) => {
                     const div = document.createElement('div');
                     div.className = 'ldx-search-item';
+                    div.dataset.idx = idx;
                     const time = document.createElement('span');
                     time.className = 'ldx-search-time';
                     time.textContent = `[${formatTime(dm.time)}]`;
                     div.appendChild(time);
+                    const badge = badgeFor(dm);
+                    if (badge) {
+                        const b = document.createElement('span');
+                        b.className = 'ldx-search-badge ' + badge[0];
+                        b.textContent = badge[1];
+                        div.appendChild(b);
+                    }
                     if (dm.user) {
                         const user = document.createElement('span');
                         user.className = 'ldx-search-user';
@@ -2712,18 +2882,25 @@
                         div.appendChild(user);
                     }
                     div.appendChild(document.createTextNode(dm.text));
-                    div.addEventListener('click', () => {
-                        if (videoElement) {
-                            videoElement.currentTime = dm.time + globalTimeOffset;
-                            triggerFullDanmakuReset(videoElement.currentTime);
-                            if (videoElement.paused) videoElement.play();
-                        }
-                        searchResults.style.display = 'none';
-                        setTimeout(() => { searchResults.style.display = 'block'; }, 300);
-                    });
-                    searchResults.appendChild(div);
+                    frag.appendChild(div);
                 });
+                searchResults.appendChild(frag);
             }
+            searchResults.addEventListener('click', (e) => {
+                const item = e.target.closest('.ldx-search-item');
+                if (!item || item.dataset.idx === undefined) return;
+                const dm = lastSearchMatches[+item.dataset.idx];
+                if (!dm) return;
+                if (videoElement) {
+                    // 回退 0.5s：seek 有毫秒级精度误差，精确跳到弹幕时间点时弹幕可能被判为已过（shown 静默跳过）而不显示；
+                    // 回退后目标弹幕仍落在调度窗口 [currentTime, currentTime+2) 内，会立即创建显示
+                    videoElement.currentTime = Math.max(0, dm.time + globalTimeOffset - 0.5);
+                    triggerFullDanmakuReset(videoElement.currentTime);
+                    if (videoElement.paused) videoElement.play();
+                }
+                searchResults.style.display = 'none';
+                setTimeout(() => { searchResults.style.display = 'block'; }, 300);
+            });
             searchBtn.addEventListener('click', performDanmakuSearch);
             searchInput.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') performDanmakuSearch();
@@ -2745,7 +2922,26 @@
                 userFormatField.style.display = cfgShowSender ? '' : 'none';
             }
             updateUserFormatVisibility();
-            showSc.addEventListener('change', (e) => { cfgShowSC = e.target.checked; saveLiveCfg(); triggerFullDanmakuReset(videoElement.currentTime); });
+            const scMinPriceInput = document.getElementById('ldx-sc-min-price');
+            const scPriceField = document.getElementById('ldx-sc-price-field');
+            scMinPriceInput.value = String(cfgSCMinPrice);
+            function updateSCPriceVisibility() {
+                scPriceField.style.display = cfgShowSC ? '' : 'none';
+            }
+            updateSCPriceVisibility();
+            scMinPriceInput.addEventListener('change', (e) => {
+                const n = parseFloat(e.target.value);
+                cfgSCMinPrice = (isFinite(n) && n > 0) ? n : 0;
+                e.target.value = String(cfgSCMinPrice);
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
+            showSc.addEventListener('change', (e) => {
+                cfgShowSC = e.target.checked;
+                updateSCPriceVisibility();
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
             showSender.addEventListener('change', (e) => { cfgShowSender = e.target.checked; saveLiveCfg(); updateUserFormatVisibility(); triggerFullDanmakuReset(videoElement.currentTime); });
             const giftMinPriceInput = document.getElementById('ldx-gift-min-price');
             const giftPriceField = document.getElementById('ldx-gift-price-field');
@@ -2767,7 +2963,26 @@
                 saveLiveCfg();
                 triggerFullDanmakuReset(videoElement.currentTime);
             });
-            showGuard.addEventListener('change', (e) => { cfgShowGuard = e.target.checked; saveLiveCfg(); triggerFullDanmakuReset(videoElement.currentTime); });
+            const guardMinLevelSelect = document.getElementById('ldx-guard-min-level');
+            const guardLevelField = document.getElementById('ldx-guard-level-field');
+            guardMinLevelSelect.value = String(cfgGuardMinLevel);
+            function updateGuardLevelVisibility() {
+                guardLevelField.style.display = cfgShowGuard ? '' : 'none';
+            }
+            updateGuardLevelVisibility();
+            guardMinLevelSelect.addEventListener('change', (e) => {
+                const n = parseInt(e.target.value, 10);
+                cfgGuardMinLevel = (n >= 1 && n <= 3) ? n : 1;
+                e.target.value = String(cfgGuardMinLevel);
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
+            showGuard.addEventListener('change', (e) => {
+                cfgShowGuard = e.target.checked;
+                updateGuardLevelVisibility();
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
             userFormatSelect.addEventListener('change', (e) => {
                 cfgUserFormat = parseInt(e.target.value, 10) || 1;
                 saveLiveCfg();
@@ -2851,24 +3066,8 @@
             applyDmFontSize();
         }
 
-        // 密度图 Canvas
-        if (!document.getElementById('ldx-density-canvas') && progressContainer) {
-            densityCanvas = document.createElement('canvas');
-            densityCanvas.id = 'ldx-density-canvas';
-            const rect = progressContainer.getBoundingClientRect();
-            densityCanvas.width = rect.width;
-            densityCanvas.height = 30;
-            progressContainer.appendChild(densityCanvas);
-            const resizeObserver = new ResizeObserver(entries => {
-                for (let entry of entries) {
-                    const rect = entry.contentRect;
-                    densityCanvas.width = rect.width;
-                    densityCanvas.height = 30;
-                    redrawDensityGraph();
-                }
-            });
-            resizeObserver.observe(progressContainer);
-        }
+        // 密度图 Canvas：挂载/重建逻辑统一在 ensureDensityCanvas
+        ensureDensityCanvas();
 
         // 弹幕预览提示框
         if (!document.getElementById('ldx-tooltip') && videoWrap) {
@@ -2888,5 +3087,17 @@
 
     // 启动脚本
     waitForPlayer();
+
+    // 全局 video 元素轮询：B站切换视频时可能重建 <video> 元素，旧元素上的事件监听（弹幕调度等）
+    // 随之失效且新元素上无事件可依；此轮询不依赖 video 事件，发现替换立即重绑恢复弹幕
+    setInterval(() => {
+        ensureDensityCanvas();
+        const v = document.querySelector('video');
+        if (!v || !videoElement || v === videoElement) return;
+        console.log('[本地弹幕] 检测到 video 元素替换，重新绑定监听');
+        videoElement = v;
+        addVideoListeners();
+        if (danmakuList.length > 0) triggerFullDanmakuReset(videoElement.currentTime);
+    }, 500);
 
 })();
