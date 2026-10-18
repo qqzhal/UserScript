@@ -112,7 +112,7 @@
     // ==================== 历史弹幕文件（最近 5 个，同文件去重；索引与内容分键存储，启动只读索引） ====================
     const FILE_HISTORY_INDEX_KEY = 'ldx-file-history-index';    // 索引：[{name, display, time, offset}]，KB 级，启动时读取
     const FILE_HISTORY_CONTENT_PREFIX = 'ldx-file-hist-c:';     // 内容：每个文件独立键，点历史加载时才按需读取
-    const FILE_HISTORY_MAX = 10;
+    const FILE_HISTORY_MAX = 20;
     const FILE_HISTORY_MAX_SIZE = 1000 * 1024; // 仅无 GM 环境降级 localStorage 时生效的单文件上限；GM 存储配额大，不限制
     let historyMenu = null;
     let historyBtn = null;
@@ -846,30 +846,44 @@
         }
         .ldx-align-toggle:hover { color: #cdd1e0; }
         .ldx-align-toggle input { accent-color: #fb7299; margin: 0; cursor: pointer; }
-        /* ---------- 高亮用户弹窗（非模态：无遮罩，容器点击穿透，不挡视频播放） ---------- */
+        /* ---------- 高亮用户弹窗（非模态：无遮罩，容器点击穿透，不挡视频播放） ----------
+           挂在 body 下（脱离主容器 stacking context 以盖住视频），隐藏规则与字体需独立声明 */
+        .ldx-modal.hidden { display: none !important; }
         .ldx-modal {
             position: fixed;
             inset: 0;
-            z-index: 60;
+            z-index: 100000;
             display: flex;
             align-items: flex-start;
             justify-content: flex-start;
             padding: 70px 0 0 344px;
             pointer-events: none;
+            font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+            color: #e8eaf0;
         }
         .ldx-modal-box {
             pointer-events: auto;
             user-select: text;
             width: 290px;
-            max-height: 70vh;
+            min-width: 240px;
+            min-height: 120px;
+            resize: both;
             overflow-y: auto;
             background: linear-gradient(160deg, rgba(30, 32, 42, 0.97), rgba(16, 18, 26, 0.98));
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 12px;
             padding: 14px;
             box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
         }
+        .ldx-modal-box::-webkit-scrollbar { width: 5px; }
+        .ldx-modal-box::-webkit-scrollbar-track { background: transparent; }
+        .ldx-modal-box::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 3px; }
+        .ldx-modal-box::-webkit-scrollbar-thumb:hover { background: rgba(251, 114, 153, 0.55); }
         .ldx-modal-title {
+            cursor: move;
+            user-select: none;
             font-size: 14px;
             font-weight: 700;
             display: flex;
@@ -922,6 +936,9 @@
             margin-right: 6px;
             font-size: 11px;
         }
+        .ldx-search-user.copyable { cursor: pointer; }
+        .ldx-search-user.copyable:hover { color: #fff; text-decoration: underline; }
+        .ldx-search-user.ldx-copied { color: #7be3a2; }
         .ldx-search-badge {
             display: inline-block;
             margin-right: 6px;
@@ -1907,6 +1924,12 @@
                 const time = parseFloat(p[0]);
                 const text = item.textContent;
                 let user = item.getAttribute('user') || "";
+                // uid：独立 uid 属性优先；部分源（danmakus.com 旧弹幕）写在 p 第7段，兜底提取。
+                // 只认纯数字并排除 "0"——B 站官方 XML 的 p[6] 是 CRC32 哈希（含字母），不会被误当 uid
+                let uid = item.getAttribute('uid') || "";
+                if (!uid && p.length > 6 && /^\d+$/.test(p[6]) && p[6] !== "0") {
+                    uid = p[6];
+                }
 
                 const rawStr = item.getAttribute('raw');
                 let hash = "";
@@ -1928,7 +1951,7 @@
 
                 if (!isNaN(time) && text) {
                     // uid 仅明文属性源（如 danmakus.com）才有；哈希源为空串，不参与高亮用户匹配
-                    danmakuList.push({ time, text, type: 'danmaku', user, uid: item.getAttribute('uid') || "", shown: false });
+                    danmakuList.push({ time, text, type: 'danmaku', user, uid, shown: false });
                 }
             } catch (e) {}
         }
@@ -2352,7 +2375,8 @@
         if (isHl) {
             el.classList.add('ldx-dm-hl');
             if (!dm.type || dm.type === 'danmaku') {
-                el.style.color = '#ff6b9d';
+                // 文字色引用类里的 --ldx-glow 变量：换高亮色只改 CSS 一处，文字与光晕同步
+                el.style.color = 'var(--ldx-glow)';
                 el.style.zIndex = 25;
             }
         }
@@ -2709,17 +2733,6 @@
                             <input type="file" id="ldx-file-input" accept=".xml" hidden>
                         </div>
 
-                        <div class="ldx-section hidden" id="ldx-search-panel">
-                            <div class="ldx-section-title"><span class="ldx-ico">🔍</span><span class="ldx-title-text">搜索弹幕 · 定点对齐</span></div>
-                            <div class="ldx-search-body" id="ldx-search-body">
-                                <div class="ldx-search-row">
-                                    <input type="text" id="ldx-search-input" class="ldx-input" placeholder="搜索弹幕内容 / 用户名 / UID..." autocomplete="off">
-                                    <button id="ldx-search-btn" class="ldx-btn ldx-btn-green">搜索</button>
-                                </div>
-                                <div id="ldx-search-results" class="ldx-search-results"></div>
-                            </div>
-                        </div>
-
                         <div class="ldx-section" id="ldx-offset-controls">
                             <div class="ldx-section-title" id="ldx-offset-title"><span class="ldx-ico">📀</span><span class="ldx-title-text">精调偏移</span></div>
                             <div class="ldx-input-row">
@@ -2747,13 +2760,13 @@
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-sc"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
-                                <span>显示 用户名</span>
+                                <span>显示 用户</span>
                                 <div class="ldx-guard-level-filter ldx-gift-price-filter" id="ldx-user-format-field" title="用户名显示格式，修改后立即生效">
                                     <select id="ldx-user-format" class="ldx-input" style="width:100px">
-                                        <option value="1">弹幕(用户名)</option>
-                                        <option value="2">用户名:弹幕</option>
-                                        <option value="3">弹幕-用户名</option>
-                                        <option value="4">弹幕[用户名]</option>
+                                        <option value="1">弹幕(用户)</option>
+                                        <option value="2">用户:弹幕</option>
+                                        <option value="3">弹幕-用户</option>
+                                        <option value="4">弹幕[用户]</option>
                                     </select>
                                 </div>
                                 <button id="ldx-hl-btn" class="ldx-btn ldx-btn-ghost" title="高亮用户管理：按 UID 高亮指定用户">★</button>
@@ -2806,6 +2819,17 @@
                     </div>
                 </div>
 
+                <div id="ldx-search-panel" class="ldx-modal hidden">
+                    <div class="ldx-modal-box">
+                        <div class="ldx-modal-title"><span>🔍 搜索弹幕 · 定点对齐</span><span id="ldx-search-close" class="ldx-modal-close" title="关闭">×</span></div>
+                        <div class="ldx-search-row">
+                            <input type="text" id="ldx-search-input" class="ldx-input" placeholder="搜索弹幕内容 / 用户名 / UID..." autocomplete="off">
+                            <button id="ldx-search-btn" class="ldx-btn ldx-btn-green">搜索</button>
+                        </div>
+                        <div id="ldx-search-results" class="ldx-search-results"></div>
+                    </div>
+                </div>
+
                 <div id="ldx-hl-modal" class="ldx-modal hidden">
                     <div class="ldx-modal-box">
                         <div class="ldx-modal-title">高亮用户<span id="ldx-hl-close" class="ldx-modal-close" title="关闭">×</span></div>
@@ -2849,6 +2873,11 @@
             syncSearchPanelToggle();
             searchPanelToggle.addEventListener('click', () => {
                 searchPanel.classList.toggle('hidden');
+                syncSearchPanelToggle();
+            });
+            // 浮窗右上角 × 关闭（非模态浮窗，"搜弹幕"按钮本身也是开关）
+            document.getElementById('ldx-search-close').addEventListener('click', () => {
+                searchPanel.classList.add('hidden');
                 syncSearchPanelToggle();
             });
 
@@ -2927,6 +2956,17 @@
             // ---------- 搜索 ----------
             let lastSearchMatches = [];
             let alignAnchorTime = 0; // 对齐基准时间点：点击「搜索」时的播放进度（见 performDanmakuSearch 开头）
+            function copyTextFallback(text) {
+                // 剪贴板 API 兜底：临时 textarea + execCommand（旧内核 / 非聚焦场景）
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                try { document.execCommand('copy'); } catch (e) {}
+                ta.remove();
+            }
             function performDanmakuSearch() {
                 // 对齐基准在点「搜索」瞬间冻结：看到弹幕立刻点搜索，误差只剩人手反应的 1~2 秒，
                 // 之后输入关键字 / 翻结果期间视频继续播多久都不影响基准
@@ -2988,7 +3028,7 @@
                 headRow.appendChild(alignToggle);
                 searchResults.appendChild(headRow);
                 searchResults.classList.toggle('ldx-hide-align', !cfgShowAlignBtn);
-                addTip(`点条目=跳到该弹幕前3秒；点「对齐」=校准偏移，弹幕约提前${ALIGN_LEAD}s出现（补偿观众发弹幕延迟）`);
+                //addTip(`点条目=跳到该弹幕前3秒；点「对齐」=校准偏移，弹幕约提前${ALIGN_LEAD}s出现（补偿观众发弹幕延迟）`);
                 // 特殊弹幕在结果中加类型徽标便于区分，普通弹幕不显示
                 const badgeFor = (dm) => {
                     if (dm.type === 'sc') return ['sc', `SC${cfgShowSCPrice ? ` ￥${dm.price}` : ''}`];
@@ -3028,8 +3068,11 @@
                     }
                     if (dm.user) {
                         const user = document.createElement('span');
-                        user.className = 'ldx-search-user';
+                        // 有效 uid（正数）才提供点击复制；"-1"/"0" 这类占位值不提供
+                        const uidOk = dm.uid && Number(dm.uid) > 0;
+                        user.className = 'ldx-search-user' + (uidOk ? ' copyable' : '');
                         user.textContent = dm.user;
+                        user.title = uidOk ? `点击复制 UID: ${dm.uid}` : '该弹幕无有效 UID';
                         div.appendChild(user);
                     }
                     div.appendChild(document.createTextNode(dm.text));
@@ -3053,6 +3096,26 @@
                         btn.classList.add('ldx-aligned');
                         btn.textContent = '✓';
                         setTimeout(() => { btn.classList.remove('ldx-aligned'); btn.textContent = '对齐'; }, 1200);
+                    }
+                    return;
+                }
+                // 点用户名 = 复制该条弹幕的 UID（仅 copyable 条目：有效正数 uid）；剪贴板 API 不可用时走 execCommand 兜底
+                if (e.target.closest('.ldx-search-user.copyable')) {
+                    if (dm.uid) {
+                        const userSpan = e.target.closest('.ldx-search-user');
+                        const done = () => {
+                            userSpan.classList.add('ldx-copied');
+                            setTimeout(() => userSpan.classList.remove('ldx-copied'), 700);
+                        };
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(String(dm.uid)).then(done, () => {
+                                copyTextFallback(String(dm.uid));
+                                done();
+                            });
+                        } else {
+                            copyTextFallback(String(dm.uid));
+                            done();
+                        }
                     }
                     return;
                 }
@@ -3248,6 +3311,10 @@
             const hlList = document.getElementById('ldx-hl-list');
             const hlInput = document.getElementById('ldx-hl-input');
             const hlAddBtn = document.getElementById('ldx-hl-add');
+            // 浮窗移出主容器、直接挂到 body：脱离容器的 stacking context（其 z-index 仅 10），
+            // 否则浮窗内部 z-index 再高也只在容器上下文内比较，会被视频区域整体压住
+            document.body.appendChild(searchPanel);
+            document.body.appendChild(hlModal);
             function renderHlList() {
                 hlList.innerHTML = '';
                 if (!hlUsers.length) {
@@ -3266,7 +3333,7 @@
                     uid.textContent = u.uid;
                     const name = document.createElement('span');
                     name.className = 'name';
-                    name.textContent = u.name || '（待该用户的弹幕出现后自动补充昵称）';
+                    name.textContent = u.name || '（待用户弹幕出现后自动补充）';
                     const del = document.createElement('button');
                     del.className = 'ldx-hl-del';
                     del.textContent = '删除';
@@ -3301,6 +3368,37 @@
                 // 立即生效：清屏重排，屏上已显示的高亮弹幕按新状态重建
                 triggerFullDanmakuReset(videoElement.currentTime);
             });
+
+            // ---------- 浮窗拖动：标题栏按住拖移，默认位置由 CSS 定，拖后位置会话内保持 ----------
+            function makeFloatDraggable(modal) {
+                const box = modal.querySelector('.ldx-modal-box');
+                const handle = modal.querySelector('.ldx-modal-title');
+                if (!box || !handle) return;
+                handle.addEventListener('mousedown', (e) => {
+                    // 只响应左键；× 关闭按钮不作为拖拽起点
+                    if (e.button !== 0 || e.target.closest('.ldx-modal-close')) return;
+                    e.preventDefault();
+                    const rect = box.getBoundingClientRect();
+                    box.style.position = 'fixed';
+                    box.style.left = rect.left + 'px';
+                    box.style.top = rect.top + 'px';
+                    box.style.margin = '0';
+                    const dx = e.clientX - rect.left, dy = e.clientY - rect.top;
+                    const move = (ev) => {
+                        // 钳制在视口内：至少留 60px 宽 / 36px 高在屏幕上，保证拖得回来
+                        box.style.left = Math.min(Math.max(ev.clientX - dx, 60 - box.offsetWidth), window.innerWidth - 60) + 'px';
+                        box.style.top = Math.min(Math.max(ev.clientY - dy, 0), window.innerHeight - 36) + 'px';
+                    };
+                    const up = () => {
+                        document.removeEventListener('mousemove', move);
+                        document.removeEventListener('mouseup', up);
+                    };
+                    document.addEventListener('mousemove', move);
+                    document.addEventListener('mouseup', up);
+                });
+            }
+            makeFloatDraggable(searchPanel);
+            makeFloatDraggable(hlModal);
             function addHlUser() {
                 const uid = hlInput.value.trim();
                 if (!uid) return;
