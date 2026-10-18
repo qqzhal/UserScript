@@ -3,11 +3,10 @@
 // @name:en      Bilibili Local Danmaku (Beautified)
 // @namespace    https://github.com/YourName/bilibili-local-danmaku
 // @version      1.0.0
-// @description  全新毛玻璃界面：手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、手动精调偏移、弹幕搜索定点对齐、密度图与进度条预览。
-// @description:en Beautified UI: load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), fine-tuning, search-based alignment, density graph & progress preview.
+// @description  手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、弹幕搜索定点对齐、密度图与进度条预览。
+// @description:en Load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), search-based alignment, density graph & progress preview.
 // @author       Codex
-// @match        *://www.bilibili.com/video/*
-// @match        *://www.bilibili.com/bangumi/*
+// @match        *://www.bilibili.com/*
 // @icon         https://www.bilibili.com/favicon.ico
 // @grant        GM_addStyle
 // @grant        GM_setValue
@@ -93,10 +92,11 @@
     // ---- 上舰 ----
     const DM_GUARD_GLOW_PERIOD = 1.4;  // 舰长发光脉冲周期（秒），CSS 与 JS 共用，改时长时需保持列表对齐
     const MAX_GUARD_DURATION = 45.0;   // 上舰驻留上限，与合并/SC 一致
+    // 搜索「对齐」的提前量（秒）：对齐后弹幕比停留位置提前这么久出现——
+    // 观众从看到画面到发出弹幕天然晚几秒，适度提前补偿滞后又不至于过量
+    const ALIGN_LEAD = 2.0; // 弹幕提前出现的秒数，想多提前几秒就加几。
 
     // ---- 偏移 / 字号 / 预览 ----
-    const MIN_FT_OFFSET = -60.0;       // 手动偏移范围下限（秒）
-    const MAX_FT_OFFSET = 60.0;        // 手动偏移范围上限（秒）
     const DM_MIN_FONT_SIZE = 12;       // 弹幕字号范围
     const DM_MAX_FONT_SIZE = 60;
     const MAX_PREVIEW_LINES = 10;      // 进度条悬停预览的弹幕行数
@@ -112,7 +112,7 @@
     // ==================== 历史弹幕文件（最近 5 个，同文件去重；索引与内容分键存储，启动只读索引） ====================
     const FILE_HISTORY_INDEX_KEY = 'ldx-file-history-index';    // 索引：[{name, display, time, offset}]，KB 级，启动时读取
     const FILE_HISTORY_CONTENT_PREFIX = 'ldx-file-hist-c:';     // 内容：每个文件独立键，点历史加载时才按需读取
-    const FILE_HISTORY_MAX = 5;
+    const FILE_HISTORY_MAX = 10;
     const FILE_HISTORY_MAX_SIZE = 1000 * 1024; // 仅无 GM 环境降级 localStorage 时生效的单文件上限；GM 存储配额大，不限制
     let historyMenu = null;
     let historyBtn = null;
@@ -234,10 +234,15 @@
     let cfgShowSender = false; // 显示发送者ID
     let cfgShowSC = true;      // 显示 SuperChat
     let cfgSCMinPrice = 0;     // 屏蔽 N 元以下的 SC（0 = 不屏蔽），SC 开关旁输入框设置
+    let cfgShowSCPrice = true;   // SC 前缀 [👻SC ￥x] 中是否显示金额
     let cfgShowGift = false;   // 显示礼物
     let cfgGiftMinPrice = 0;   // 屏蔽 N 元以下的礼物（0 = 不屏蔽），打开"显示礼物"开关时询问
+    let cfgShowGiftPrice = true; // 礼物前缀 [🎁礼物 ￥x] 中是否显示金额
     let cfgShowGuard = true;   // 显示舰长
     let cfgGuardMinLevel = 1;  // 上舰显示级别下限：1=舰长及以上(全显) 2=提督及以上 3=仅总督，舰长开关旁下拉设置
+    let cfgShowGuardPrice = true; // 上舰前缀 [🚀上舰 ￥x] 中是否显示金额
+    let cfgShowAlignBtn = false;  // 搜索结果是否显示「对齐」按钮（默认隐藏，结果头部开关控制，多数搜索用不到对齐）
+    let cfgHlEnabled = true;      // 高亮用户总开关：关闭后不匹配不高亮，已添加的列表保留
     let cfgUserFormat = 1;     // 用户名显示格式：1=弹幕(用户名) 2=用户名:弹幕 3=弹幕-用户名 4=弹幕[用户名]
     try {
         const savedCfg = JSON.parse(localStorage.getItem(LIVE_CFG_KEY) || '{}');
@@ -245,10 +250,15 @@
         if (typeof savedCfg.sc === 'boolean') cfgShowSC = savedCfg.sc;
         const smp = Number(savedCfg.scMinPrice);
         if (isFinite(smp) && smp >= 0) cfgSCMinPrice = smp;
+        if (typeof savedCfg.scPrice === 'boolean') cfgShowSCPrice = savedCfg.scPrice;
         if (typeof savedCfg.gift === 'boolean') cfgShowGift = savedCfg.gift;
         const gmp = Number(savedCfg.giftMinPrice);
         if (isFinite(gmp) && gmp >= 0) cfgGiftMinPrice = gmp;
+        if (typeof savedCfg.giftPrice === 'boolean') cfgShowGiftPrice = savedCfg.giftPrice;
         if (typeof savedCfg.guard === 'boolean') cfgShowGuard = savedCfg.guard;
+        if (typeof savedCfg.guardPrice === 'boolean') cfgShowGuardPrice = savedCfg.guardPrice;
+        if (typeof savedCfg.alignBtn === 'boolean') cfgShowAlignBtn = savedCfg.alignBtn;
+        if (typeof savedCfg.hl === 'boolean') cfgHlEnabled = savedCfg.hl;
         const gml = Number(savedCfg.guardMinLevel);
         if (gml >= 1 && gml <= 3) cfgGuardMinLevel = gml;
         const uf = Number(savedCfg.userFormat);
@@ -258,6 +268,8 @@
         localStorage.setItem(LIVE_CFG_KEY, JSON.stringify({
             sender: cfgShowSender, sc: cfgShowSC, gift: cfgShowGift, guard: cfgShowGuard,
             userFormat: cfgUserFormat, giftMinPrice: cfgGiftMinPrice, scMinPrice: cfgSCMinPrice,
+            scPrice: cfgShowSCPrice, giftPrice: cfgShowGiftPrice, guardPrice: cfgShowGuardPrice,
+            alignBtn: cfgShowAlignBtn, hl: cfgHlEnabled,
             guardMinLevel: cfgGuardMinLevel
         }));
     }
@@ -277,9 +289,7 @@
     }
 
     // UI 引用
-    let offsetSlider = null;
     let offsetInput = null;
-    let globalOffsetDisplay = null;
     let statusBadge = null;
     let loadBtn = null;
 
@@ -322,6 +332,20 @@
         }
         return out;
     }
+
+    // ==================== 高亮用户（按 UID 匹配，强制显示昵称+金色样式） ====================
+    const HL_USERS_KEY = 'ldx-hl-users';
+    let hlUsers = [];           // [{ uid: '1347778', name: '、大杯柠七' }]，匹配只看 uid，昵称仅作展示且自动跟随改名
+    let hlUserSet = new Set();  // uid 字符串集合，播放时 O(1) 判断
+    try {
+        const saved = JSON.parse(localStorage.getItem(HL_USERS_KEY) || '[]');
+        if (Array.isArray(saved)) hlUsers = saved.filter(u => u && u.uid);
+    } catch (e) {}
+    function saveHlUsers() {
+        localStorage.setItem(HL_USERS_KEY, JSON.stringify(hlUsers));
+        hlUserSet = new Set(hlUsers.map(u => String(u.uid)));
+    }
+    saveHlUsers();
 
     // ==================== 样式（全新美化版） ====================
     GM_addStyle(`
@@ -447,11 +471,6 @@
             border-color: rgba(123, 227, 162, 0.6);
             box-shadow: 0 0 8px rgba(123, 227, 162, 0.25);
         }
-        .ldx-stats-menu {
-            width: 126px;
-            left: 0;
-            right: auto;
-        }
         .ldx-stats-row {
             display: flex;
             justify-content: space-between;
@@ -493,7 +512,7 @@
             position: absolute;
             right: 0;
             top: calc(100% + 6px);
-            width: 260px;
+            width: 290px;
             background: linear-gradient(160deg, rgba(30, 32, 42, 0.97), rgba(16, 18, 26, 0.98));
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 10px;
@@ -503,6 +522,8 @@
             overflow: hidden;
         }
         .ldx-history-menu.open { display: block; }
+        /* 统计菜单必须声明在 .ldx-history-menu 之后：同权重属性会被后者覆盖，放前面会导致 126px 宽度失效 */
+        .ldx-stats-menu { width: 126px; }
         .ldx-history-item {
             padding: 8px 11px;
             font-size: 12px;
@@ -687,7 +708,7 @@
         }
         .ldx-gift-price-unit { font-size: 11px; color: #8a8fa3; white-space: nowrap; }
         .ldx-guard-level-filter .ldx-input {
-            width: 82px;
+            /*width: 82px;*/
             padding: 3px 4px;
             font-size: 11.5px;
         }
@@ -732,67 +753,7 @@
             margin-bottom: 4px;
         }
 
-        /* ---------- 滑块 ---------- */
-        .ldx-range {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 100%;
-            height: 5px;
-            border-radius: 3px;
-            background: linear-gradient(90deg, rgba(251, 114, 153, 0.45), rgba(0, 174, 236, 0.45));
-            outline: none;
-            margin: 8px 0;
-            cursor: pointer;
-        }
-        /* 偏移滑块默认隐藏（功能保留，调节仍生效），想恢复显示时删除下面这一行即可 */
-        #ldx-offset-slider { display: none; }
-        .ldx-range::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            background: #fff;
-            border: none;
-            cursor: pointer;
-            box-shadow: 0 0 0 3px #fb7299, 0 2px 6px rgba(0, 0, 0, 0.4);
-            transition: transform 0.15s, box-shadow 0.15s;
-        }
-        .ldx-range::-webkit-slider-thumb:hover {
-            transform: scale(1.15);
-            box-shadow: 0 0 0 4px #fb7299, 0 2px 8px rgba(0, 0, 0, 0.5);
-        }
-        .ldx-range::-moz-range-thumb {
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: #fff;
-            border: none;
-            box-shadow: 0 0 0 3px #fb7299;
-            cursor: pointer;
-        }
-
-        /* ---------- 显示行 / 快捷按钮 ---------- */
-        .ldx-display-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            background: rgba(0, 0, 0, 0.25);
-            border-radius: 9px;
-            padding: 6px 11px;
-            margin-bottom: 6px;
-            font-size: 12.5px;
-        }
-        .ldx-display-row .ldx-label { color: #8a8fa3; }
-        .ldx-value {
-            font-weight: 700;
-            font-size: 14px;
-            font-family: Consolas, "JetBrains Mono", monospace;
-            transition: color 0.3s;
-        }
-        #ldx-offset-value.ldx-offset-zero { color: #7be3a2; }
-        #ldx-offset-value.ldx-offset-pos { color: #ffc24b; }
-        #ldx-offset-value.ldx-offset-neg { color: #ff6b81; }
+        /* ---------- 快捷按钮 ---------- */
         .ldx-chip-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -842,6 +803,114 @@
         }
         .ldx-search-item:last-child { border-bottom: none; }
         .ldx-search-item:hover { background: rgba(251, 114, 153, 0.16); color: #fff; }
+        .ldx-align-btn {
+            display: inline-block;
+            margin-right: 6px;
+            padding: 1px 5px;
+            font-size: 10px;
+            color: #8a8fa3;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.09);
+            border-radius: 6px;
+            cursor: pointer;
+            vertical-align: 1px;
+            transition: all 0.15s;
+        }
+        .ldx-align-btn:hover {
+            color: #7be3a2;
+            border-color: rgba(123, 227, 162, 0.45);
+            background: rgba(123, 227, 162, 0.12);
+        }
+        .ldx-align-btn.ldx-aligned {
+            color: #7be3a2;
+            border-color: rgba(123, 227, 162, 0.5);
+            background: rgba(123, 227, 162, 0.15);
+        }
+        /* 开关关闭时整批隐藏对齐按钮：容器挂类一次切换，重建列表后状态依然由类保持 */
+        #ldx-search-results.ldx-hide-align .ldx-align-btn { display: none; }
+        .ldx-results-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: default;
+        }
+        .ldx-align-toggle {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #8a8fa3;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        .ldx-align-toggle:hover { color: #cdd1e0; }
+        .ldx-align-toggle input { accent-color: #fb7299; margin: 0; cursor: pointer; }
+        /* ---------- 高亮用户弹窗（非模态：无遮罩，容器点击穿透，不挡视频播放） ---------- */
+        .ldx-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 60;
+            display: flex;
+            align-items: flex-start;
+            justify-content: flex-start;
+            padding: 70px 0 0 344px;
+            pointer-events: none;
+        }
+        .ldx-modal-box {
+            pointer-events: auto;
+            user-select: text;
+            width: 290px;
+            max-height: 70vh;
+            overflow-y: auto;
+            background: linear-gradient(160deg, rgba(30, 32, 42, 0.97), rgba(16, 18, 26, 0.98));
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 14px;
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+        }
+        .ldx-modal-title {
+            font-size: 14px;
+            font-weight: 700;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .ldx-modal-close { cursor: pointer; color: #8a8fa3; font-size: 18px; line-height: 1; }
+        .ldx-modal-close:hover { color: #fff; }
+        .ldx-modal-hint { font-size: 11px; color: #8a8fa3; line-height: 1.6; margin-bottom: 8px; }
+        .ldx-modal-add { display: flex; gap: 6px; margin-bottom: 8px; }
+        .ldx-modal-add .ldx-input { flex: 1; min-width: 0; }
+        .ldx-modal-list { display: flex; flex-direction: column; }
+        .ldx-hl-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 2px;
+            border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+            font-size: 12px;
+        }
+        .ldx-hl-row:last-child { border-bottom: none; }
+        .ldx-hl-row .uid { color: #8a8fa3; font-family: Consolas, monospace; font-size: 11px; }
+        .ldx-hl-row .name { flex: 1; color: #e8eaf0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ldx-hl-del {
+            cursor: pointer;
+            color: #ff6b81;
+            background: none;
+            border: none;
+            font-size: 11px;
+            padding: 2px 4px;
+        }
+        .ldx-hl-del:hover { text-decoration: underline; }
+        /* 高亮用户弹幕：玫红 + 加粗 + 复用舰长的发光脉冲动画（--ldx-glow 换成玫红）；
+           选择器必须带 .ldx-dm 双类抬高特异性，否则 animation 会被后面声明的 .ldx-dm 基础类覆盖回单动画 */
+        .ldx-dm.ldx-dm-hl {
+            --ldx-glow: #ff6b9d;
+            font-weight: 700;
+            animation: ldx-scroll ${DM_SCROLL_DURATION}s linear, ldx-guard-glow ${DM_GUARD_GLOW_PERIOD}s ease-in-out infinite;
+        }
+
         .ldx-search-time {
             color: #8a8fa3;
             margin-right: 8px;
@@ -1750,8 +1819,6 @@
         fineTuneOffset = loadOffset;
         globalTimeOffset = loadOffset;
         localStorage.setItem(DM_OFFSET_KEY, String(loadOffset));
-        updateGlobalOffsetDisplay();
-        if (offsetSlider) offsetSlider.value = loadOffset;
         if (offsetInput) offsetInput.value = loadOffset.toFixed(1);
 
         if (statusBadge) {
@@ -1860,7 +1927,8 @@
                 }
 
                 if (!isNaN(time) && text) {
-                    danmakuList.push({ time, text, type: 'danmaku', user, shown: false });
+                    // uid 仅明文属性源（如 danmakus.com）才有；哈希源为空串，不参与高亮用户匹配
+                    danmakuList.push({ time, text, type: 'danmaku', user, uid: item.getAttribute('uid') || "", shown: false });
                 }
             } catch (e) {}
         }
@@ -1871,9 +1939,10 @@
                 const time = parseFloat(item.getAttribute('ts'));
                 const rawData = safeJSONParse(item.getAttribute('raw'));
                 const user = rawData?.user_info?.uname || item.getAttribute('user') || "未知";
+                const uid = item.getAttribute('uid') || String(rawData?.user_info?.uid || "");
                 const price = item.getAttribute('price') || "0";
                 const text = item.textContent;
-                if (!isNaN(time)) danmakuList.push({ time, text, type: 'sc', user, price, shown: false });
+                if (!isNaN(time)) danmakuList.push({ time, text, type: 'sc', user, uid, price, shown: false });
             } catch (e) {}
         }
         for (let item of xmlDoc.getElementsByTagName('gift')) {
@@ -1881,6 +1950,7 @@
                 const time = parseFloat(item.getAttribute('ts'));
                 const rawData = safeJSONParse(item.getAttribute('raw'));
                 const user = rawData?.sender_uinfo?.name || item.getAttribute('user') || "未知";
+                const uid = item.getAttribute('uid') || String(rawData?.sender_uinfo?.uid || "");
                 const giftName = item.getAttribute('giftname') || "礼物";
                 const count = item.getAttribute('giftcount') || "1";
                 // 礼物价格统一换算成元：录制源单位不统一——danmakus.com 金瓜子按千分之一元、银瓜子为免费货币、
@@ -1900,12 +1970,16 @@
                 // 部分录制工具（如 danmakus.com）把上舰记录为 gift（giftname=舰长/提督/总督），转成舰长事件走舰长样式
                 if (!isNaN(time) && (giftName === "舰长" || giftName === "提督" || giftName === "总督")) {
                     const gLevel = giftName === "总督" ? 3 : (giftName === "提督" ? 2 : 1);
-                    danmakuList.push({ time, text: guardText(gLevel), type: 'guard', level: gLevel, user, shown: false });
+                    // 一次上舰多个月（如连续包月 count=3）时追加 " x N"，1 或缺字段默认 1 不显示
+                    const gCount = parseInt(count, 10) || 1;
+                    const gText = gCount > 1 ? `${guardText(gLevel)} x ${gCount}` : guardText(gLevel);
+                    const gUid = item.getAttribute('uid') || String(rawData?.sender_uinfo?.uid || "");
+                    danmakuList.push({ time, text: gText, type: 'guard', level: gLevel, user, uid: gUid, priceYuan, shown: false });
                 } else if (!isNaN(time)) {
                     const countNum = parseInt(count, 10);
                     // 数量为 1 时不追加个数后缀
                     const giftText = countNum > 1 ? `${giftName} x ${countNum}` : giftName;
-                    danmakuList.push({ time, text: giftText, type: 'gift', user, count, priceYuan, shown: false });// 投喂了 
+                    danmakuList.push({ time, text: giftText, type: 'gift', user, uid, count, priceYuan, shown: false });// 投喂了 
                 }
             } catch (e) {}
         }
@@ -1917,7 +1991,25 @@
                 const level = item.getAttribute('level');
                 // B站 level 属性 1=总督 2=提督 3=舰长，映射为内部枚举（1 舰长/2 提督/3 总督，越大越高）
                 const lv = level === "1" ? 3 : (level === "2" ? 2 : 1);
-                if (!isNaN(time)) danmakuList.push({ time, text: guardText(lv), type: 'guard', level: lv, user, shown: false });
+                // 上舰金额必须取节点真实价格（连续包月 138 与月购 198 同级不同价，不能按等级推算）：
+                // raw 报文 price 为金瓜子（千分之一元），XML 属性按 cointype 区分——金瓜子/1000，银瓜子免费，其余（舰长等）已是元
+                let priceYuan = 0;
+                if (rawData && isFinite(rawData.price)) {
+                    priceYuan = rawData.coin_type === 'silver' ? 0 : rawData.price / 1000;
+                } else {
+                    const cointype = item.getAttribute('cointype') || '';
+                    const p = parseFloat(item.getAttribute('price'));
+                    if (isFinite(p)) {
+                        if (cointype === '金瓜子') priceYuan = p / 1000;
+                        else if (cointype === '银瓜子') priceYuan = 0;
+                        else priceYuan = p;
+                    }
+                }
+                // count 是一次上舰的月数（如连续包月一次买 N 个月），>1 时追加 " x N"，1 或缺字段默认 1 不显示
+                const gCount = parseInt(item.getAttribute('count'), 10) || 1;
+                const gText = gCount > 1 ? `${guardText(lv)} x ${gCount}` : guardText(lv);
+                const gUid = item.getAttribute('uid') || String(rawData?.uid || "");
+                if (!isNaN(time)) danmakuList.push({ time, text: gText, type: 'guard', level: lv, user, uid: gUid, priceYuan, shown: false });
             } catch (e) {}
         }
 
@@ -1937,12 +2029,9 @@
     }
 
     // ==================== 偏移逻辑 ====================
-    function updateFineTuneOffset(newFineTune, source = '') {
+    function updateFineTuneOffset(newFineTune) {
         if (!videoElement) return;
 
-        if (source === 'slider') {
-            newFineTune = Math.max(MIN_FT_OFFSET, Math.min(MAX_FT_OFFSET, newFineTune));
-        }
         newFineTune = Math.round(newFineTune * 10) / 10;
         if (isNaN(newFineTune)) { newFineTune = 0.0; }
 
@@ -1958,31 +2047,13 @@
             }
         }
 
-        updateGlobalOffsetDisplay();
-
-        if (source !== 'slider' && offsetSlider) {
-            offsetSlider.value = Math.max(MIN_FT_OFFSET, Math.min(MAX_FT_OFFSET, newFineTune));
-        }
-        if (source !== 'input' && offsetInput) {
+        if (offsetInput) {
             offsetInput.value = newFineTune.toFixed(1);
         }
 
         redrawDensityGraph();
-        // 偏移调整走软重置：在飞弹幕继续飘完，新弹幕按新偏移调度，拖滑块不闪屏
+        // 偏移调整走软重置：在飞弹幕继续飘完，新弹幕按新偏移调度，调整不闪屏
         softDanmakuReset(videoElement.currentTime);
-    }
-
-    function updateGlobalOffsetDisplay() {
-        if (!globalOffsetDisplay) return;
-        globalOffsetDisplay.textContent = globalTimeOffset.toFixed(1) + 's';
-        globalOffsetDisplay.classList.remove('ldx-offset-zero', 'ldx-offset-pos', 'ldx-offset-neg');
-        if (globalTimeOffset > 0.05) {
-            globalOffsetDisplay.classList.add('ldx-offset-pos');
-        } else if (globalTimeOffset < -0.05) {
-            globalOffsetDisplay.classList.add('ldx-offset-neg');
-        } else {
-            globalOffsetDisplay.classList.add('ldx-offset-zero');
-        }
     }
 
     // 软重置：只重排调度指针，不清屏——在飞弹幕作为旧时间段残影自然消散
@@ -2206,38 +2277,44 @@
         if (dm.type === 'guard' && (dm.level || guardLevel(dm.text)) < cfgGuardMinLevel) return;
 
         let displayText = dm.text;
+        // 高亮用户：按 uid 匹配（无 uid 的录制源不参与），命中则强制显示昵称并用玫红样式；总开关关闭时整条链路跳过
+        const isHl = cfgHlEnabled && dm.uid && hlUserSet.has(String(dm.uid));
+
+        // 用户名拼接，跟随「显示 用户名」下拉选择的格式
+        const applyUserFormat = (base, user) => {
+            switch (cfgUserFormat) {
+                case 2: return `${user}: ${base}`;
+                case 3: return `${base}-${user}`;
+                case 4: return `${base}[${user}]`;
+                default: return `${base}(${user})`;
+            }
+        };
 
         // 舰长/SC/礼物：无论显示用户开关是否开启，都追加 (用户名)，不参与通用格式选择
         if ((dm.type === 'guard' || dm.type === 'sc' || dm.type === 'gift') && dm.user) {
             displayText = `${displayText} (${dm.user})`;
-        } else if (cfgShowSender && dm.user) {
-            switch (cfgUserFormat) {
-                case 2:
-                    displayText = `${dm.user}: ${displayText}`;
-                    break;
-                case 3:
-                    displayText = `${displayText}-${dm.user}`;
-                    break;
-                case 4:
-                    displayText = `${displayText}[${dm.user}]`;
-                    break;
-                default:
-                    displayText = `${displayText}(${dm.user})`;
-                    break;
-            }
+        } else if ((isHl || cfgShowSender) && dm.user) {
+            // 高亮用户与开关开启共用格式化分支（互斥不重复追加）；高亮不受开关限制，任何情况都显示昵称
+            displayText = applyUserFormat(displayText, dm.user);
+        }
+        // 高亮用户昵称自动跟随改名：与记录不同才写盘，同一用户的大量弹幕不会反复触发
+        if (isHl && dm.user) {
+            const rec = hlUsers.find(u => String(u.uid) === String(dm.uid));
+            if (rec && rec.name !== dm.user) { rec.name = dm.user; saveHlUsers(); }
         }
 
         switch (dm.type) {
             case 'sc':
-                displayText = `[👻SC ￥${dm.price}] ${displayText}`;
+                displayText = `[👻SC${cfgShowSCPrice ? ` ￥${dm.price}` : ''}] ${displayText}`;
                 break;
             case 'gift':
-                displayText = `[🎁礼物] ${displayText}`;
+                displayText = `[🎁礼物${cfgShowGiftPrice ? ` ￥${dm.priceYuan}` : ''}] ${displayText}`;
                 break;
             case 'guard': {
                 // 前缀固定为"图标+上舰"，正文文案由 guardText 维护（guardIcon 的 emoji 是 showDanmaku 样式分支的判断依据）
+                // 金额是节点真实价格（连续包月 138 与月购 198 同级不同价），数据源缺失（0）时不显示金额
                 const gLv = dm.level || guardLevel(dm.text);
-                displayText = `[${guardIcon(gLv)}上舰] ${displayText}`;
+                displayText = `[${guardIcon(gLv)}上舰${cfgShowGuardPrice && dm.priceYuan > 0 ? ` ￥${dm.priceYuan}` : ''}] ${displayText}`;
                 break;
             }
         }
@@ -2258,9 +2335,11 @@
                 el.style.setProperty('--ldx-scale', mergeScale(cacheEntry.count));
                 // 合并条数越多，动画越长，弹幕在屏幕上停留越久；log2 增长比 log10 陡，高合并数时驻留提升更明显
                 const extraDuration = Math.log2(cacheEntry.count) * DM_MERGE_DURATION_BONUS;
-                el.style.animationDuration = Math.min(DM_SCROLL_DURATION + extraDuration, MAX_MERGE_DURATION) + 's';
-                el.style.zIndex = 10 + cacheEntry.count;
-                el.style.textShadow = '1px 1px 3px black, 0 0 3px black';
+                el.style.animationDuration = Math.min(DM_SCROLL_DURATION + extraDuration, MAX_MERGE_DURATION) + 's'
+                    + (isHl ? ', ' + DM_GUARD_GLOW_PERIOD + 's' : '');
+                el.style.zIndex = isHl ? Math.max(100, 10 + cacheEntry.count) : 10 + cacheEntry.count;
+                // 高亮弹幕的发光由 ldx-guard-glow 动画驱动，内联 textShadow 会压住动画，故高亮时不设
+                if (!isHl) el.style.textShadow = '1px 1px 3px black, 0 0 3px black';
                 return;
             }
         }
@@ -2268,9 +2347,20 @@
         const el = showDanmaku(displayText, dm.type);
         if (!el) return;
 
+        // 高亮用户样式：普通弹幕覆盖为玫红并加粗发光，层级抬到普通(1)/常规合并(10+)之上、礼物(20)/SC(50)之下；
+        // SC/礼物/上舰保留类型识别色与类型层级，只叠加发光
+        if (isHl) {
+            el.classList.add('ldx-dm-hl');
+            if (!dm.type || dm.type === 'danmaku') {
+                el.style.color = '#ff6b9d';
+                el.style.zIndex = 25;
+            }
+        }
+
         // SC / 礼物按金额决定滚动速度：小额默认，金额越高滚得越慢（驻留越久）
         if (dm.type === 'sc') {
-            el.style.animationDuration = priceScrollDuration(dm.price, SC_PRICE_DURATION_BONUS_TABLE, MAX_SC_DURATION) + 's';
+            el.style.animationDuration = priceScrollDuration(dm.price, SC_PRICE_DURATION_BONUS_TABLE, MAX_SC_DURATION) + 's'
+                + (isHl ? ', ' + DM_GUARD_GLOW_PERIOD + 's' : '');
         }
         if (dm.type === 'gift') {
             // 高价礼物分档发光放大：≥120 / ≥500 / ≥1000 元逐级增强，层级抬到普通弹幕之上
@@ -2285,7 +2375,8 @@
             }
             const duration = Math.max(MIN_GIFT_DURATION, priceScrollDuration(dm.priceYuan, GIFT_PRICE_DURATION_BONUS_TABLE, MAX_GIFT_DURATION));
             // 发光档是滚动+发光双动画，时长必须用列表逐一对应，否则发光周期会被一起拉长
-            el.style.animationDuration = luxClass ? duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's' : duration + 's';
+            el.style.animationDuration = luxClass ? duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's'
+                : duration + 's' + (isHl ? ', ' + DM_GUARD_GLOW_PERIOD + 's' : '');
         }
         // 上舰按等级决定滚动速度：舰长 1.5 倍时长，提督 6 倍时长，总督 10 倍，超出 MAX_GUARD_DURATION 的部分被封顶截断；
         // 舰长是滚动+发光双动画，时长必须用列表逐一对应，否则发光周期会被一起拉长
@@ -2565,13 +2656,16 @@
     // ==================== UI 构建（全新美化版） ====================
     function waitForPlayer() {
         videoElement = document.querySelector('video');
-        videoWrap = document.querySelector('.bpx-player-video-wrap');
-        progressContainer = document.querySelector('.bpx-player-progress-wrap');
-        if (videoElement && videoWrap && progressContainer) {
+        if (videoElement) {
+            // video 是硬条件；播放器容器类名可能随 B 站改版/灰度变化，逐级兜底确保面板总能出现
+            videoWrap = document.querySelector('.bpx-player-video-wrap')
+                     || videoElement.closest('[class*="player"]')
+                     || videoElement.parentElement;
+            progressContainer = document.querySelector('.bpx-player-progress-wrap');
             setupApp();
-        } else {
-            setTimeout(waitForPlayer, 1000);
+            return;
         }
+        setTimeout(waitForPlayer, 1000);
     }
 
     function setupApp() {
@@ -2619,7 +2713,7 @@
                             <div class="ldx-section-title"><span class="ldx-ico">🔍</span><span class="ldx-title-text">搜索弹幕 · 定点对齐</span></div>
                             <div class="ldx-search-body" id="ldx-search-body">
                                 <div class="ldx-search-row">
-                                    <input type="text" id="ldx-search-input" class="ldx-input" placeholder="输入弹幕内容搜索..." autocomplete="off">
+                                    <input type="text" id="ldx-search-input" class="ldx-input" placeholder="搜索弹幕内容 / 用户名 / UID..." autocomplete="off">
                                     <button id="ldx-search-btn" class="ldx-btn ldx-btn-green">搜索</button>
                                 </div>
                                 <div id="ldx-search-results" class="ldx-search-results"></div>
@@ -2627,15 +2721,9 @@
                         </div>
 
                         <div class="ldx-section" id="ldx-offset-controls">
-                            <div class="ldx-section-title" id="ldx-offset-title"><span class="ldx-ico">🎛️</span><span class="ldx-title-text">精调偏移</span></div>
-                            <!-- 总偏移已默认隐藏（hidden 类）：偏移输入框即当前总偏移，想恢复显示时去掉 hidden 即可 -->
-                            <div class="ldx-display-row hidden">
-                                <span class="ldx-label">总偏移</span>
-                                <span class="ldx-value ldx-offset-zero" id="ldx-offset-value">0.0s</span>
-                            </div>
-                            <input type="range" id="ldx-offset-slider" class="ldx-range" min="${MIN_FT_OFFSET}" max="${MAX_FT_OFFSET}" step="0.1" value="${fineTuneOffset}">
+                            <div class="ldx-section-title" id="ldx-offset-title"><span class="ldx-ico">📀</span><span class="ldx-title-text">精调偏移</span></div>
                             <div class="ldx-input-row">
-                                <input type="number" id="ldx-offset-input" class="ldx-input" step="1" value="${fineTuneOffset.toFixed(1)}">
+                                <input type="number" id="ldx-offset-input" class="ldx-input" step="1" value="${fineTuneOffset.toFixed(1)}" placeholder="0.0" title="偏移秒数：正数弹幕延后出现，负数弹幕提前出现">
                                 <button id="ldx-search-panel-toggle" class="ldx-btn ldx-btn-ghost" title="展开 / 收起搜索面板">搜弹幕</button>
                                 <button id="ldx-offset-reset" class="ldx-btn ldx-btn-reset">重置</button>
                             </div>
@@ -2651,27 +2739,40 @@
                             <div class="ldx-section-title"><span class="ldx-ico">📺</span><span class="ldx-title-text">直播录播设置</span></div>
                             <div class="ldx-switch-row">
                                 <span>显示 SC</span>
-                                <div class="ldx-gift-price-filter" id="ldx-sc-price-field" title="屏蔽该价格(元)以下的SC，0 为不屏蔽，修改后立即生效">
+                                <div class="ldx-gift-price-filter" id="ldx-sc-price-field" title="元起显示：屏蔽该价格(元)以下的SC，0 为不屏蔽，修改后立即生效">
+                                    <span class="ldx-gift-price-unit" title="SC 前缀是否显示金额（如 [👻SC ￥30]），修改后立即生效">显示金额</span>
+                                    <label class="ldx-switch" title="SC 前缀是否显示金额（如 [👻SC ￥30]），修改后立即生效"><input type="checkbox" id="ldx-show-sc-price"><span class="ldx-track"></span></label>
                                     <input type="number" id="ldx-sc-min-price" class="ldx-input" min="0" step="1" placeholder="0">
-                                    <span class="ldx-gift-price-unit">元起显示</span>
                                 </div>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-sc"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
                                 <span>显示 用户名</span>
+                                <div class="ldx-guard-level-filter ldx-gift-price-filter" id="ldx-user-format-field" title="用户名显示格式，修改后立即生效">
+                                    <select id="ldx-user-format" class="ldx-input" style="width:100px">
+                                        <option value="1">弹幕(用户名)</option>
+                                        <option value="2">用户名:弹幕</option>
+                                        <option value="3">弹幕-用户名</option>
+                                        <option value="4">弹幕[用户名]</option>
+                                    </select>
+                                </div>
+                                <button id="ldx-hl-btn" class="ldx-btn ldx-btn-ghost" title="高亮用户管理：按 UID 高亮指定用户">★</button>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-sender"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
                                 <span>显示 礼物</span>
-                                <div class="ldx-gift-price-filter" id="ldx-gift-price-field" title="屏蔽该价格(元)以下的礼物，0 为不屏蔽，修改后立即生效">
+                                <div class="ldx-gift-price-filter" id="ldx-gift-price-field" title="元起显示：屏蔽该价格(元)以下的礼物，0 为不屏蔽，修改后立即生效">
+                                    <span class="ldx-gift-price-unit" title="礼物前缀是否显示金额（如 [🎁礼物 ￥10]），修改后立即生效">显示金额</span>
+                                    <label class="ldx-switch" title="礼物前缀是否显示金额（如 [🎁礼物 ￥10]），修改后立即生效"><input type="checkbox" id="ldx-show-gift-price"><span class="ldx-track"></span></label>
                                     <input type="number" id="ldx-gift-min-price" class="ldx-input" min="0" step="0.1" placeholder="0">
-                                    <span class="ldx-gift-price-unit">元起显示</span>
                                 </div>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-gift"><span class="ldx-track"></span></label>
                             </div>
                             <div class="ldx-switch-row">
                                 <span>显示 舰长</span>
                                 <div class="ldx-guard-level-filter ldx-gift-price-filter" id="ldx-guard-level-field" title="只显示该级别及以上的上舰，修改后立即生效">
+                                    <span class="ldx-gift-price-unit" title="上舰前缀是否显示金额（如 [🚀上舰 ￥198]），修改后立即生效">显示金额</span>
+                                    <label class="ldx-switch" title="上舰前缀是否显示金额（如 [🚀上舰 ￥198]），修改后立即生效"><input type="checkbox" id="ldx-show-guard-price"><span class="ldx-track"></span></label>
                                     <select id="ldx-guard-min-level" class="ldx-input">
                                         <option value="1">舰长+</option>
                                         <option value="2">提督+</option>
@@ -2679,15 +2780,6 @@
                                     </select>
                                 </div>
                                 <label class="ldx-switch"><input type="checkbox" id="ldx-show-guard"><span class="ldx-track"></span></label>
-                            </div>
-                            <div class="ldx-field" id="ldx-user-format-field">
-                                <label class="ldx-label">用户名显示格式</label>
-                                <select id="ldx-user-format" class="ldx-input">
-                                    <option value="1">弹幕(用户名)</option>
-                                    <option value="2">用户名:弹幕</option>
-                                    <option value="3">弹幕-用户名</option>
-                                    <option value="4">弹幕[用户名]</option>
-                                </select>
                             </div>
                         </div>
 
@@ -2711,6 +2803,22 @@
                                 <a class="ldx-link" href="https://danmakus.com/search" target="_blank" rel="noopener">DANMAKUS</a>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <div id="ldx-hl-modal" class="ldx-modal hidden">
+                    <div class="ldx-modal-box">
+                        <div class="ldx-modal-title">高亮用户<span id="ldx-hl-close" class="ldx-modal-close" title="关闭">×</span></div>
+                        <div class="ldx-modal-hint">输入用户 UID 添加，自动从已载入弹幕关联昵称，此后无需维护；播放时强制显示昵称并以玫红高亮，无 UID 的录制源不参与匹配</div>
+                        <label class="ldx-align-toggle" style="margin-bottom:8px" title="关闭后不匹配高亮用户，已添加的列表保留；重新开启立即生效">
+                            <input type="checkbox" id="ldx-hl-enabled">启用高亮
+                        </label>
+                        <div class="ldx-modal-add">
+                            <input type="text" id="ldx-hl-input" class="ldx-input" placeholder="输入 UID" autocomplete="off">
+                            <button id="ldx-hl-add" class="ldx-btn ldx-btn-green">添加</button>
+                            <button id="ldx-hl-refresh" class="ldx-btn ldx-btn-ghost" title="从当前已载入的弹幕中按 UID 反查昵称，更新整个列表（主播改名后可用）">刷新昵称</button>
+                        </div>
+                        <div id="ldx-hl-list" class="ldx-modal-list"></div>
                     </div>
                 </div>
             `;
@@ -2818,7 +2926,11 @@
 
             // ---------- 搜索 ----------
             let lastSearchMatches = [];
+            let alignAnchorTime = 0; // 对齐基准时间点：点击「搜索」时的播放进度（见 performDanmakuSearch 开头）
             function performDanmakuSearch() {
+                // 对齐基准在点「搜索」瞬间冻结：看到弹幕立刻点搜索，误差只剩人手反应的 1~2 秒，
+                // 之后输入关键字 / 翻结果期间视频继续播多久都不影响基准
+                if (videoElement) alignAnchorTime = videoElement.currentTime;
                 const query = searchInput.value.trim();
                 searchResults.innerHTML = '';
                 if (!query) {
@@ -2836,6 +2948,8 @@
                     if (!d.text) return false;
                     if (d.text.includes(query)) return true;
                     if (d.user && d.user.includes(query)) return true;
+                    // 数字关键词同时匹配 UID：直接搜某用户的全部发言/记录
+                    if (d.uid && String(d.uid).includes(query)) return true;
                     if (query === '上舰' && d.type === 'guard') return true;
                     //if (query.toLowerCase() === 'sc' && d.type === 'sc') return true;
                     //if (query === '礼物' && d.type === 'gift') return true;
@@ -2854,16 +2968,37 @@
                     tip.textContent = text;
                     searchResults.appendChild(tip);
                 };
-                addTip(`共 ${matches.length} 条匹配`);
+                // 头部行：匹配计数 + 「对齐」按钮显隐开关（默认隐藏，省出条目文本宽度）
+                const headRow = document.createElement('div');
+                headRow.className = 'ldx-search-item ldx-results-head';
+                headRow.textContent = `共 ${matches.length} 条匹配 · 对齐基准 ${formatTime(alignAnchorTime, false)}`;
+                const alignToggle = document.createElement('label');
+                alignToggle.className = 'ldx-align-toggle';
+                alignToggle.title = '显示 / 隐藏结果条目上的「对齐」按钮';
+                const alignCheck = document.createElement('input');
+                alignCheck.type = 'checkbox';
+                alignCheck.checked = cfgShowAlignBtn;
+                alignCheck.addEventListener('change', (e) => {
+                    cfgShowAlignBtn = e.target.checked;
+                    saveLiveCfg();
+                    searchResults.classList.toggle('ldx-hide-align', !cfgShowAlignBtn);
+                });
+                alignToggle.appendChild(alignCheck);
+                alignToggle.appendChild(document.createTextNode('对齐按钮'));
+                headRow.appendChild(alignToggle);
+                searchResults.appendChild(headRow);
+                searchResults.classList.toggle('ldx-hide-align', !cfgShowAlignBtn);
+                addTip(`点条目=跳到该弹幕前3秒；点「对齐」=校准偏移，弹幕约提前${ALIGN_LEAD}s出现（补偿观众发弹幕延迟）`);
                 // 特殊弹幕在结果中加类型徽标便于区分，普通弹幕不显示
                 const badgeFor = (dm) => {
-                    if (dm.type === 'sc') return ['sc', `SC ￥${dm.price}`];
-                    if (dm.type === 'gift') return ['gift', '礼物'];
+                    if (dm.type === 'sc') return ['sc', `SC${cfgShowSCPrice ? ` ￥${dm.price}` : ''}`];
+                    if (dm.type === 'gift') return ['gift', `礼物${cfgShowGiftPrice ? ` ￥${dm.priceYuan}` : ''}`];
                     if (dm.type === 'guard') {
                         const lv = dm.level || guardLevel(dm.text);
-                        if (lv === 3) return ['guard-governor', '总督'];
-                        if (lv === 2) return ['guard-admiral', '提督'];
-                        return ['guard', '舰长'];
+                        const priceTag = cfgShowGuardPrice && dm.priceYuan > 0 ? ` ￥${dm.priceYuan}` : '';
+                        if (lv === 3) return ['guard-governor', `总督${priceTag}`];
+                        if (lv === 2) return ['guard-admiral', `提督${priceTag}`];
+                        return ['guard', `舰长${priceTag}`];
                     }
                     return null;
                 };
@@ -2874,6 +3009,12 @@
                     const div = document.createElement('div');
                     div.className = 'ldx-search-item';
                     div.dataset.idx = idx;
+                    // 行首对齐按钮：条目文本超长走省略号截断，放行尾会被吃掉，放行首永不截断
+                    const alignBtn = document.createElement('span');
+                    alignBtn.className = 'ldx-align-btn';
+                    alignBtn.textContent = '对齐';
+                    alignBtn.title = '以此弹幕对齐偏移时间：和主播视频里的弹幕列表同一条弹幕出现时间补偿对齐（根据搜索时候当前播放进度偏移计算，建议看到弹幕就暂停）';
+                    div.appendChild(alignBtn);
                     const time = document.createElement('span');
                     time.className = 'ldx-search-time';
                     time.textContent = `[${formatTime(dm.time)}]`;
@@ -2901,10 +3042,24 @@
                 if (!item || item.dataset.idx === undefined) return;
                 const dm = lastSearchMatches[+item.dataset.idx];
                 if (!dm) return;
+                // 「对齐」分支：新偏移 = 对齐基准(点「搜索」时的进度) - 弹幕时间戳 - 提前量(ALIGN_LEAD)，
+                // 让这条弹幕在基准位置前约 4 秒出现，适度补偿观众发弹幕的天然延迟；
+                // 基准不取点「对齐」时的进度：搜索出来后继续播放再点，基准也不会漂移；
+                // 复用 updateFineTuneOffset（归整/持久化/历史配对/输入框回写/软重置全在里面），对齐后留在结果列表便于对比
+                if (e.target.closest('.ldx-align-btn')) {
+                    if (videoElement) {
+                        updateFineTuneOffset(alignAnchorTime - dm.time - ALIGN_LEAD);
+                        const btn = e.target.closest('.ldx-align-btn');
+                        btn.classList.add('ldx-aligned');
+                        btn.textContent = '✓';
+                        setTimeout(() => { btn.classList.remove('ldx-aligned'); btn.textContent = '对齐'; }, 1200);
+                    }
+                    return;
+                }
                 if (videoElement) {
-                    // 回退 0.5s：seek 有毫秒级精度误差，精确跳到弹幕时间点时弹幕可能被判为已过（shown 静默跳过）而不显示；
-                    // 回退后目标弹幕仍落在调度窗口 [currentTime, currentTime+2) 内，会立即创建显示
-                    videoElement.currentTime = Math.max(0, dm.time + globalTimeOffset - 0.5);
+                    // 回退 3s：画面里看到相关弹幕时它其实早已刷过，跳到弹幕出现前 3 秒回看刷屏过程；
+                    // 目标弹幕落在 seek 立即调度窗口 [t, t+2) 之外，3 秒后按正常调度自然出现
+                    videoElement.currentTime = Math.max(0, dm.time + globalTimeOffset - 3);
                     triggerFullDanmakuReset(videoElement.currentTime);
                     if (videoElement.paused) videoElement.play();
                 }
@@ -2952,6 +3107,13 @@
                 saveLiveCfg();
                 triggerFullDanmakuReset(videoElement.currentTime);
             });
+            const showScPrice = document.getElementById('ldx-show-sc-price');
+            showScPrice.checked = cfgShowSCPrice;
+            showScPrice.addEventListener('change', (e) => {
+                cfgShowSCPrice = e.target.checked;
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
             showSender.addEventListener('change', (e) => { cfgShowSender = e.target.checked; saveLiveCfg(); updateUserFormatVisibility(); triggerFullDanmakuReset(videoElement.currentTime); });
             const giftMinPriceInput = document.getElementById('ldx-gift-min-price');
             const giftPriceField = document.getElementById('ldx-gift-price-field');
@@ -2970,6 +3132,13 @@
             showGift.addEventListener('change', (e) => {
                 cfgShowGift = e.target.checked;
                 updateGiftPriceVisibility();
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
+            const showGiftPrice = document.getElementById('ldx-show-gift-price');
+            showGiftPrice.checked = cfgShowGiftPrice;
+            showGiftPrice.addEventListener('change', (e) => {
+                cfgShowGiftPrice = e.target.checked;
                 saveLiveCfg();
                 triggerFullDanmakuReset(videoElement.currentTime);
             });
@@ -2993,6 +3162,13 @@
                 saveLiveCfg();
                 triggerFullDanmakuReset(videoElement.currentTime);
             });
+            const showGuardPrice = document.getElementById('ldx-show-guard-price');
+            showGuardPrice.checked = cfgShowGuardPrice;
+            showGuardPrice.addEventListener('change', (e) => {
+                cfgShowGuardPrice = e.target.checked;
+                saveLiveCfg();
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
             userFormatSelect.addEventListener('change', (e) => {
                 cfgUserFormat = parseInt(e.target.value, 10) || 1;
                 saveLiveCfg();
@@ -3000,17 +3176,10 @@
             });
 
             // ---------- 偏移 ----------
-            offsetSlider = document.getElementById('ldx-offset-slider');
             offsetInput = document.getElementById('ldx-offset-input');
-            globalOffsetDisplay = document.getElementById('ldx-offset-value');
-            offsetSlider.value = fineTuneOffset;
             offsetInput.value = fineTuneOffset.toFixed(1);
-            updateGlobalOffsetDisplay();
-            offsetSlider.addEventListener('input', (e) => {
-                updateFineTuneOffset(parseFloat(e.target.value), 'slider');
-            });
             offsetInput.addEventListener('change', (e) => {
-                updateFineTuneOffset(parseFloat(e.target.value), 'input');
+                updateFineTuneOffset(parseFloat(e.target.value));
             });
             document.getElementById('ldx-offset-reset').addEventListener('click', () => updateFineTuneOffset(0.0));
             document.getElementById('ldx-offset-m5').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset - 5.0));
@@ -3071,6 +3240,94 @@
                 localStorage.setItem(T2S_KEY, cfgT2S ? 'true' : 'false');
                 updateT2SBtn();
                 triggerFullDanmakuReset(videoElement.currentTime);
+            });
+
+            // ---------- 高亮用户管理弹窗 ----------
+            const hlBtn = document.getElementById('ldx-hl-btn');
+            const hlModal = document.getElementById('ldx-hl-modal');
+            const hlList = document.getElementById('ldx-hl-list');
+            const hlInput = document.getElementById('ldx-hl-input');
+            const hlAddBtn = document.getElementById('ldx-hl-add');
+            function renderHlList() {
+                hlList.innerHTML = '';
+                if (!hlUsers.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'ldx-modal-hint';
+                    empty.style.margin = '4px 0';
+                    empty.textContent = '列表为空，输入 UID 添加';
+                    hlList.appendChild(empty);
+                    return;
+                }
+                for (const u of hlUsers) {
+                    const row = document.createElement('div');
+                    row.className = 'ldx-hl-row';
+                    const uid = document.createElement('span');
+                    uid.className = 'uid';
+                    uid.textContent = u.uid;
+                    const name = document.createElement('span');
+                    name.className = 'name';
+                    name.textContent = u.name || '（待该用户的弹幕出现后自动补充昵称）';
+                    const del = document.createElement('button');
+                    del.className = 'ldx-hl-del';
+                    del.textContent = '删除';
+                    del.addEventListener('click', () => {
+                        hlUsers = hlUsers.filter(x => String(x.uid) !== String(u.uid));
+                        saveHlUsers();
+                        renderHlList();
+                    });
+                    row.appendChild(uid);
+                    row.appendChild(name);
+                    row.appendChild(del);
+                    hlList.appendChild(row);
+                }
+            }
+            hlBtn.addEventListener('click', () => {
+                // 非模态弹窗无遮罩层，开关走 ★ 按钮自身切换
+                if (hlModal.classList.contains('hidden')) {
+                    renderHlList();
+                    hlInput.value = '';
+                    hlEnabledCheck.checked = cfgHlEnabled;
+                    hlModal.classList.remove('hidden');
+                } else {
+                    hlModal.classList.add('hidden');
+                }
+            });
+            document.getElementById('ldx-hl-close').addEventListener('click', () => hlModal.classList.add('hidden'));
+            const hlEnabledCheck = document.getElementById('ldx-hl-enabled');
+            hlEnabledCheck.checked = cfgHlEnabled;
+            hlEnabledCheck.addEventListener('change', (e) => {
+                cfgHlEnabled = e.target.checked;
+                saveLiveCfg();
+                // 立即生效：清屏重排，屏上已显示的高亮弹幕按新状态重建
+                triggerFullDanmakuReset(videoElement.currentTime);
+            });
+            function addHlUser() {
+                const uid = hlInput.value.trim();
+                if (!uid) return;
+                if (hlUsers.some(u => String(u.uid) === uid)) { hlInput.value = ''; return; }
+                // 从当前载入的弹幕里反查该 uid 的昵称自动关联；查不到先空着，播放到时自动补
+                const hit = danmakuList.find(d => d.uid && String(d.uid) === uid && d.user);
+                hlUsers.push({ uid, name: hit ? hit.user : '' });
+                saveHlUsers();
+                hlInput.value = '';
+                renderHlList();
+            }
+            hlAddBtn.addEventListener('click', addHlUser);
+            hlInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') addHlUser();
+            });
+            // 刷新昵称：从当前弹幕按 UID 反查，批量更新列表（换载入别的视频后可补齐/修正昵称）
+            document.getElementById('ldx-hl-refresh').addEventListener('click', (e) => {
+                let updated = 0;
+                for (const u of hlUsers) {
+                    const hit = danmakuList.find(d => d.uid && String(d.uid) === String(u.uid) && d.user);
+                    if (hit && hit.user !== u.name) { u.name = hit.user; updated++; }
+                }
+                if (updated) saveHlUsers();
+                renderHlList();
+                const btn = e.target.closest('button');
+                btn.textContent = updated ? `✓ 更新${updated}条` : '✓ 无变化';
+                setTimeout(() => { btn.textContent = '刷新昵称'; }, 1500);
             });
 
             applyDmFontSize();
