@@ -13,8 +13,14 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @license      MIT
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
+
+// ------------------------------------------------------------------
+// 来源说明：本脚本基于 GreasyFork #556404
+// (https://greasyfork.org/zh-CN/scripts/556404) 的版本二次修改而来，
+// 在其基础上做了功能增强与重构。遵循原脚本的开源许可，如有侵权请联系处理。
+// ------------------------------------------------------------------
 
 (function() {
     'use strict';
@@ -113,6 +119,9 @@
     const FILE_HISTORY_INDEX_KEY = 'ldx-file-history-index';    // 索引：[{name, display, time, offset}]，KB 级，启动时读取
     const FILE_HISTORY_CONTENT_PREFIX = 'ldx-file-hist-c:';     // 内容：每个文件独立键，点历史加载时才按需读取
     const FILE_HISTORY_MAX = 20;
+    // GM 存储的历史内容总量配额：TM 注入脚本前会把该脚本全部 GM 值打包传输，
+    // 实测总量 ~50MB 起注入失败/阻塞（面板与同页面其他脚本全部失效），45MB 留安全余量
+    const FILE_HISTORY_QUOTA = 45 * 1024 * 1024;
     const FILE_HISTORY_MAX_SIZE = 1000 * 1024; // 仅无 GM 环境降级 localStorage 时生效的单文件上限；GM 存储配额大，不限制
     let historyMenu = null;
     let historyBtn = null;
@@ -151,6 +160,30 @@
 
     let fileHistory = historyLoad();
     storageRemove('ldx-file-history'); // 清理旧版全量缓存键
+    // 旧索引条目无 size 字段：一次性读取内容键回填实际体积，供总量配额计算
+    {
+        let needSave = false;
+        for (const h of fileHistory) {
+            if (!h.size) {
+                const c = historyGetContent(h.name);
+                h.size = c ? c.length : 0;
+                needSave = true;
+            }
+        }
+        if (needSave) saveHistoryIndex();
+    }
+    // 存储体检：历史内容存于 TM 的 GM 存储（注入时会被 TM 整体打包），体积异常膨胀
+    // 可能导致 TM 注入失败/阻塞（症状：面板与同页面其他脚本全部失效），启动时报告分布
+    if (fileHistory.length) {
+        const sizes = fileHistory.map(h => h.size || 0);
+        const total = sizes.reduce((a, b) => a + b, 0);
+        const maxIdx = sizes.indexOf(Math.max(...sizes));
+        // 用字符串拼接而非 console 格式化：360 等内核的 console.log 不支持 %.1f 精度语法
+        console.log('[本地弹幕] 历史缓存体检: ' + fileHistory.length + ' 个文件, 共约 '
+            + (total / 1048576).toFixed(1) + ' MB, 最大单文件 ' + (sizes[maxIdx] / 1048576).toFixed(1)
+            + ' MB [' + (fileHistory[maxIdx].display || fileHistory[maxIdx].name || '?') + ']'
+            + (fileHistory.some(h => !h.size) ? '（部分旧条目无体积记录）' : ''));
+    }
     let currentHistoryName = null; // 当前加载的文件名，用于同步配对偏移
     let historySaveTimer = null;
 
@@ -176,10 +209,26 @@
 
     function addToHistory(fileName, content, offset) {
         if (!fileName) return;
-        // 有 GM 存储时不限大小，大文件也能进历史；无 GM 降级 localStorage 时才限制，避免撑爆其 5MB 配额
+        // 有 GM 存储时不限单文件大小，大文件也能进历史；无 GM 降级 localStorage 时才限制，避免撑爆其 5MB 配额
         if (!hasGMStorage() && content.length > FILE_HISTORY_MAX_SIZE) return;
         // 先做同名去重：内容键以文件名生成，同名的新内容稍后直接覆盖写入，无需删除旧键
         fileHistory = fileHistory.filter(h => h.name !== fileName);
+        // GM 总量配额：超过安全线就从最旧的开始清理（内容键连带索引），总量恒低于故障线
+        const totalSize = () => fileHistory.reduce((s, h) => s + Math.max(0, h.size || 0), 0);
+        if (content.length > FILE_HISTORY_QUOTA) {
+            console.warn('[本地弹幕] 该文件 ' + (content.length / 1048576).toFixed(1)
+                + ' MB 超过历史缓存总配额, 不入历史');
+            return;
+        }
+        let evicted = 0;
+        while (fileHistory.length > 0 && totalSize() + content.length > FILE_HISTORY_QUOTA) {
+            storageRemove(contentKey(fileHistory[fileHistory.length - 1].name));
+            fileHistory.pop();
+            evicted++;
+        }
+        if (evicted) {
+            console.warn('[本地弹幕] 历史缓存总量超 45MB 配额, 已自动清理最旧的 ' + evicted + ' 个文件');
+        }
         // 写内容键（每文件独立，写坏/写不下时历史里不留无内容的条目）
         if (!storageSet(contentKey(fileName), content)) {
             // localStorage 空间不足：从最旧的一条开始丢弃腾位重试
@@ -194,7 +243,8 @@
             name: fileName,
             display: cleanFileName(fileName),
             time: Date.now(),
-            offset: offset
+            offset: offset,
+            size: content.length  // 体积入索引：配额计算与启动体检均不读内容
         });
         if (fileHistory.length > FILE_HISTORY_MAX) {
             // 淘汰超出上限的旧条目时，连带清掉其内容键
@@ -202,6 +252,7 @@
         }
         saveHistoryIndex();
         updateHistoryMenu();
+        updateHistoryBtnTitle();
     }
 
     function updateHistoryMenu() {
@@ -214,8 +265,33 @@
         fileHistory.forEach(h => {
             const item = document.createElement('div');
             item.className = 'ldx-history-item';
-            item.textContent = h.display || h.name;
             item.title = h.name;
+            const txt = document.createElement('span');
+            txt.className = 'ldx-history-text';
+            txt.textContent = h.display || h.name;
+            item.appendChild(txt);
+            // 行尾删除：只清 TM 存储里的缓存记录，磁盘上的 XML 文件不受影响
+            const del = document.createElement('span');
+            del.className = 'ldx-history-del';
+            del.textContent = '删除';
+            del.title = '从历史缓存中移除（两步确认；磁盘上的 XML 文件不受影响）';
+            let armTimer = null;
+            del.addEventListener('click', (e) => {
+                e.stopPropagation();
+                // 两步确认：第一次点进入待确认态（变实心红），2.5 秒内再点才执行
+                if (!del.classList.contains('ldx-del-arm')) {
+                    del.classList.add('ldx-del-arm');
+                    del.textContent = '确认删除';
+                    armTimer = setTimeout(() => {
+                        del.classList.remove('ldx-del-arm');
+                        del.textContent = '删除';
+                    }, 2500);
+                    return;
+                }
+                clearTimeout(armTimer);
+                removeHistoryEntry(h.name);   // 菜单随后整体重建，按钮无需手动复位
+            });
+            item.appendChild(del);
             item.addEventListener('click', () => {
                 historyMenu.classList.remove('open');
                 const content = historyGetContent(h.name);
@@ -227,6 +303,23 @@
             });
             historyMenu.appendChild(item);
         });
+    }
+
+    function updateHistoryBtnTitle() {
+        if (!historyBtn) return;
+        const used = fileHistory.reduce((s, h) => s + Math.max(0, h.size || 0), 0);
+        historyBtn.title = '历史缓存已用 ' + (used / 1048576).toFixed(1) + ' / '
+            + (FILE_HISTORY_QUOTA / 1048576).toFixed(0) + ' MB（超过会自动清理最旧的）';
+    }
+
+    function removeHistoryEntry(name) {
+        fileHistory = fileHistory.filter(h => h.name !== name);
+        storageRemove(contentKey(name));
+        // 若删的正是当前载入的文件，清掉关联标记，避免后续偏移调整写回已删条目
+        if (currentHistoryName === name) currentHistoryName = null;
+        saveHistoryIndex();
+        updateHistoryMenu();
+        updateHistoryBtnTitle();
     }
 
     // 直播弹幕显示开关（带记忆）
@@ -525,15 +618,41 @@
         /* 统计菜单必须声明在 .ldx-history-menu 之后：同权重属性会被后者覆盖，放前面会导致 126px 宽度失效 */
         .ldx-stats-menu { width: 126px; }
         .ldx-history-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
             padding: 8px 11px;
             font-size: 12px;
             color: #cdd1e0;
             cursor: pointer;
             white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
             border-bottom: 1px solid rgba(255, 255, 255, 0.05);
             transition: background 0.15s;
+        }
+        .ldx-history-text {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .ldx-history-del {
+            flex-shrink: 0;
+            font-size: 10px;
+            color: #ff6b81;
+            border: 1px solid rgba(255, 107, 129, 0.4);
+            background: rgba(255, 107, 129, 0.08);
+            cursor: pointer;
+            padding: 1px 5px;
+            border-radius: 4px;
+            transition: all 0.15s;
+        }
+        .ldx-history-del:hover { background: rgba(255, 107, 129, 0.22); }
+        /* 两步确认态：第一次点击后短暂变为实心红“确认删除”，再点才执行 */
+        .ldx-history-del.ldx-del-arm {
+            color: #fff;
+            background: #ff6b81;
+            border-color: #ff6b81;
+            white-space: nowrap;
         }
         .ldx-history-item:last-child { border-bottom: none; }
         .ldx-history-item:hover { background: rgba(251, 114, 153, 0.16); color: #fff; }
@@ -2681,12 +2800,20 @@
     function waitForPlayer() {
         videoElement = document.querySelector('video');
         if (videoElement) {
-            // video 是硬条件；播放器容器类名可能随 B 站改版/灰度变化，逐级兜底确保面板总能出现
-            videoWrap = document.querySelector('.bpx-player-video-wrap')
-                     || videoElement.closest('[class*="player"]')
-                     || videoElement.parentElement;
-            progressContainer = document.querySelector('.bpx-player-progress-wrap');
-            setupApp();
+            try {
+                // video 是硬条件；播放器容器类名可能随 B 站改版/灰度变化，逐级兜底确保面板总能出现
+                videoWrap = document.querySelector('.bpx-player-video-wrap')
+                         || videoElement.closest('[class*="player"]')
+                         || videoElement.parentElement;
+                progressContainer = document.querySelector('.bpx-player-progress-wrap');
+                setupApp();
+                console.log('[本地弹幕] 面板初始化完成');
+            } catch (e) {
+                // 页面未完全就绪时的偶发异常不应永久瘫痪：5 秒后重试（setup 幂等可重入）
+                console.error('[本地弹幕] 初始化异常, 5 秒后重试:', e);
+                videoElement = null;
+                setTimeout(waitForPlayer, 5000);
+            }
             return;
         }
         setTimeout(waitForPlayer, 1000);
@@ -2811,8 +2938,8 @@
                         <div class="ldx-section">
                             <div class="ldx-section-title"><span class="ldx-ico">🌐</span><span class="ldx-title-text">快捷入口</span></div>
                             <div class="ldx-link-row">
+                                <a class="ldx-link" href="https://www.aicu.cc/" target="_blank" rel="noopener">Aicu</a>
                                 <a class="ldx-link" href="https://danmubox.github.io/search" target="_blank" rel="noopener">弹幕盒子</a>
-                                <a class="ldx-link" href="https://ani.gamer.com.tw" target="_blank" rel="noopener">巴哈姆特</a>
                                 <a class="ldx-link" href="https://danmakus.com/search" target="_blank" rel="noopener">DANMAKUS</a>
                             </div>
                         </div>
@@ -2859,6 +2986,7 @@
             statusBadge = document.getElementById('ldx-status');
             historyBtn = document.getElementById('ldx-history-btn');
             historyMenu = document.getElementById('ldx-history-menu');
+            updateHistoryBtnTitle();
             const fileInput = document.getElementById('ldx-file-input');
             const searchInput = document.getElementById('ldx-search-input');
             const searchBtn = document.getElementById('ldx-search-btn');
@@ -3126,8 +3254,6 @@
                     triggerFullDanmakuReset(videoElement.currentTime);
                     if (videoElement.paused) videoElement.play();
                 }
-                searchResults.style.display = 'none';
-                setTimeout(() => { searchResults.style.display = 'block'; }, 300);
             });
             searchBtn.addEventListener('click', performDanmakuSearch);
             searchInput.addEventListener('keypress', (e) => {
