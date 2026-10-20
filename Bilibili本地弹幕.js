@@ -2,11 +2,12 @@
 // @name         Bilibili 本地弹幕（美化版）
 // @name:en      Bilibili Local Danmaku (Beautified)
 // @namespace    https://github.com/YourName/bilibili-local-danmaku
-// @version      1.0.0
+// @version      1.4.0
 // @description  手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、弹幕搜索定点对齐、密度图与进度条预览。
 // @description:en Load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), search-based alignment, density graph & progress preview.
 // @author       Codex
-// @match        *://www.bilibili.com/*
+// @match        *://www.bilibili.com/video/*
+// @match        *://www.bilibili.com/bangumi/*
 // @icon         https://www.bilibili.com/favicon.ico
 // @grant        GM_addStyle
 // @grant        GM_setValue
@@ -172,18 +173,6 @@
         }
         if (needSave) saveHistoryIndex();
     }
-    // 存储体检：历史内容存于 TM 的 GM 存储（注入时会被 TM 整体打包），体积异常膨胀
-    // 可能导致 TM 注入失败/阻塞（症状：面板与同页面其他脚本全部失效），启动时报告分布
-    if (fileHistory.length) {
-        const sizes = fileHistory.map(h => h.size || 0);
-        const total = sizes.reduce((a, b) => a + b, 0);
-        const maxIdx = sizes.indexOf(Math.max(...sizes));
-        // 用字符串拼接而非 console 格式化：360 等内核的 console.log 不支持 %.1f 精度语法
-        console.log('[本地弹幕] 历史缓存体检: ' + fileHistory.length + ' 个文件, 共约 '
-            + (total / 1048576).toFixed(1) + ' MB, 最大单文件 ' + (sizes[maxIdx] / 1048576).toFixed(1)
-            + ' MB [' + (fileHistory[maxIdx].display || fileHistory[maxIdx].name || '?') + ']'
-            + (fileHistory.some(h => !h.size) ? '（部分旧条目无体积记录）' : ''));
-    }
     let currentHistoryName = null; // 当前加载的文件名，用于同步配对偏移
     let historySaveTimer = null;
 
@@ -199,6 +188,9 @@
     function cleanFileName(name) {
         let cleaned = name.replace(/^录制-\d+-/, '');
         cleaned = cleaned.replace(/^(\d{8}-\d{6})-\d+-/, '$1-');
+        // danmakus 新版默认名：主播名_房间号_开播日期-开始时间_标题.xml -> 开播日期_标题.xml
+        // （主播名可含任意字符，锚定第 2 段纯数字房间号 + 第 3 段日期-时间形态；时间与标题一并去除）
+        cleaned = cleaned.replace(/^[^_]+_\d+_(20\d{6})-\d{6}_/, '$1_');
         cleaned = cleaned.replace(/^\d{13}_(\d{13})_/, (_, start) => {
             const d = new Date(Number(start));
             const p = (n) => String(n).padStart(2, '0');
@@ -335,6 +327,7 @@
     let cfgGuardMinLevel = 1;  // 上舰显示级别下限：1=舰长及以上(全显) 2=提督及以上 3=仅总督，舰长开关旁下拉设置
     let cfgShowGuardPrice = true; // 上舰前缀 [🚀上舰 ￥x] 中是否显示金额
     let cfgShowAlignBtn = false;  // 搜索结果是否显示「对齐」按钮（默认隐藏，结果头部开关控制，多数搜索用不到对齐）
+    let cfgHlSort = 'added';      // 高亮用户列表排序：added=按添加时间 lastSeen=按最近出现时间
     let cfgHlEnabled = true;      // 高亮用户总开关：关闭后不匹配不高亮，已添加的列表保留
     let cfgUserFormat = 1;     // 用户名显示格式：1=弹幕(用户名) 2=用户名:弹幕 3=弹幕-用户名 4=弹幕[用户名]
     try {
@@ -352,6 +345,7 @@
         if (typeof savedCfg.guardPrice === 'boolean') cfgShowGuardPrice = savedCfg.guardPrice;
         if (typeof savedCfg.alignBtn === 'boolean') cfgShowAlignBtn = savedCfg.alignBtn;
         if (typeof savedCfg.hl === 'boolean') cfgHlEnabled = savedCfg.hl;
+        if (savedCfg.hlSort === 'lastSeen' || savedCfg.hlSort === 'added') cfgHlSort = savedCfg.hlSort;
         const gml = Number(savedCfg.guardMinLevel);
         if (gml >= 1 && gml <= 3) cfgGuardMinLevel = gml;
         const uf = Number(savedCfg.userFormat);
@@ -362,7 +356,7 @@
             sender: cfgShowSender, sc: cfgShowSC, gift: cfgShowGift, guard: cfgShowGuard,
             userFormat: cfgUserFormat, giftMinPrice: cfgGiftMinPrice, scMinPrice: cfgSCMinPrice,
             scPrice: cfgShowSCPrice, giftPrice: cfgShowGiftPrice, guardPrice: cfgShowGuardPrice,
-            alignBtn: cfgShowAlignBtn, hl: cfgHlEnabled,
+            alignBtn: cfgShowAlignBtn, hl: cfgHlEnabled, hlSort: cfgHlSort,
             guardMinLevel: cfgGuardMinLevel
         }));
     }
@@ -434,11 +428,24 @@
         const saved = JSON.parse(localStorage.getItem(HL_USERS_KEY) || '[]');
         if (Array.isArray(saved)) hlUsers = saved.filter(u => u && u.uid);
     } catch (e) {}
+    // 旧记录无 added：按当前列表顺序回填（相邻差 1 秒），确保按添加时间排序时保持既有顺序
+    {
+        const now = Date.now();
+        hlUsers.forEach((u, idx) => {
+            if (!u.added) u.added = now - idx * 1000;
+        });
+    }
     function saveHlUsers() {
         localStorage.setItem(HL_USERS_KEY, JSON.stringify(hlUsers));
         hlUserSet = new Set(hlUsers.map(u => String(u.uid)));
     }
+    // 最近出现时间的刷新是弹幕高频事件，不能每条都写 localStorage：30 秒节流
+    let lastHlSave = 0;
+    function saveHlUsersThrottled(now) {
+        if (now - lastHlSave > 30000) { lastHlSave = now; saveHlUsers(); }
+    }
     saveHlUsers();
+    window.addEventListener('beforeunload', () => saveHlUsers()); // 关页兜底：把未节流落盘的 lastSeen 写回
 
     // ==================== 样式（全新美化版） ====================
     GM_addStyle(`
@@ -986,6 +993,10 @@
             width: 290px;
             min-width: 240px;
             min-height: 120px;
+            /* 上限按视口计算：默认状态（面板右侧、top 70px）不超出屏幕；
+               resize 拖大也被限制在此范围内，右下角手柄始终可达 */
+            max-height: calc(100vh - 90px);
+            max-width: calc(100vw - 364px);
             resize: both;
             overflow-y: auto;
             background: linear-gradient(160deg, rgba(30, 32, 42, 0.97), rgba(16, 18, 26, 0.98));
@@ -1011,6 +1022,30 @@
             margin-bottom: 8px;
         }
         .ldx-modal-close { cursor: pointer; color: #8a8fa3; font-size: 18px; line-height: 1; }
+        .ldx-hl-sortbar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: #8a8fa3;
+            margin-bottom: 8px;
+        }
+        .ldx-sort-chip {
+            font-size: 10px;
+            color: #8a8fa3;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.09);
+            border-radius: 999px;
+            padding: 2px 8px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .ldx-sort-chip:hover { color: #fff; }
+        .ldx-sort-chip.active {
+            color: #fff;
+            background: rgba(251, 114, 153, 0.25);
+            border-color: rgba(251, 114, 153, 0.5);
+        }
         .ldx-modal-close:hover { color: #fff; }
         .ldx-modal-hint { font-size: 11px; color: #8a8fa3; line-height: 1.6; margin-bottom: 8px; }
         .ldx-modal-add { display: flex; gap: 6px; margin-bottom: 8px; }
@@ -2049,6 +2084,9 @@
                 if (!uid && p.length > 6 && /^\d+$/.test(p[6]) && p[6] !== "0") {
                     uid = p[6];
                 }
+                // p[4] 为弹幕服务器的绝对毫秒时间戳（录制当时），供高亮列表"最近出现时间"使用
+                let absTs = 0;
+                if (p.length > 4 && /^\d+$/.test(p[4]) && Number(p[4]) > 1e12) absTs = Number(p[4]);
 
                 const rawStr = item.getAttribute('raw');
                 let hash = "";
@@ -2070,7 +2108,7 @@
 
                 if (!isNaN(time) && text) {
                     // uid 仅明文属性源（如 danmakus.com）才有；哈希源为空串，不参与高亮用户匹配
-                    danmakuList.push({ time, text, type: 'danmaku', user, uid, shown: false });
+                    danmakuList.push({ time, text, type: 'danmaku', user, uid, absTs, shown: false });
                 }
             } catch (e) {}
         }
@@ -2106,6 +2144,10 @@
                     if (isFinite(p)) {
                         if (cointype === '金瓜子') priceYuan = p / 1000;
                         else if (cointype === '银瓜子') priceYuan = 0;
+                        // 其余 cointype（舰长/提督/总督等）部分源写元价（198）、部分写千分之一元（198000），
+                        // cointype 无法区分单位。以 10 万为界启发式：真实元价上限总督 19998/SC 5000，
+                        // 永远到不了 10 万；瓜子价 ≥10 万即 ≥100 元（舰长起步 198）
+                        else if (p >= 100000) priceYuan = p / 1000;
                         else priceYuan = p;
                     }
                 }
@@ -2144,6 +2186,10 @@
                     if (isFinite(p)) {
                         if (cointype === '金瓜子') priceYuan = p / 1000;
                         else if (cointype === '银瓜子') priceYuan = 0;
+                        // 其余 cointype（舰长/提督/总督等）部分源写元价（198）、部分写千分之一元（198000），
+                        // cointype 无法区分单位。以 10 万为界启发式：真实元价上限总督 19998/SC 5000，
+                        // 永远到不了 10 万；瓜子价 ≥10 万即 ≥100 元（舰长起步 198）
+                        else if (p >= 100000) priceYuan = p / 1000;
                         else priceYuan = p;
                     }
                 }
@@ -2439,10 +2485,19 @@
             // 高亮用户与开关开启共用格式化分支（互斥不重复追加）；高亮不受开关限制，任何情况都显示昵称
             displayText = applyUserFormat(displayText, dm.user);
         }
-        // 高亮用户昵称自动跟随改名：与记录不同才写盘，同一用户的大量弹幕不会反复触发
-        if (isHl && dm.user) {
+        // 高亮用户命中：刷新最近出现 + 昵称跟随改名。
+        // 最近出现取弹幕自身的绝对时间戳（只前进不回退）：回放旧录像时不会把时间
+        // 高估到"现在的播放时刻"——最近出现的语义是弹幕流里的最后出现，而非最后被回放
+        if (isHl) {
             const rec = hlUsers.find(u => String(u.uid) === String(dm.uid));
-            if (rec && rec.name !== dm.user) { rec.name = dm.user; saveHlUsers(); }
+            if (rec) {
+                const now = Date.now();
+                if (dm.absTs && dm.absTs > (rec.lastSeen || 0)) {
+                    rec.lastSeen = dm.absTs;
+                    saveHlUsersThrottled(now);
+                }
+                if (dm.user && dm.user !== rec.name) { rec.name = dm.user; saveHlUsers(); lastHlSave = now; }
+            }
         }
 
         switch (dm.type) {
@@ -2865,7 +2920,7 @@
                             <div class="ldx-input-row">
                                 <input type="number" id="ldx-offset-input" class="ldx-input" step="1" value="${fineTuneOffset.toFixed(1)}" placeholder="0.0" title="偏移秒数：正数弹幕延后出现，负数弹幕提前出现">
                                 <button id="ldx-search-panel-toggle" class="ldx-btn ldx-btn-ghost" title="展开 / 收起搜索面板">搜弹幕</button>
-                                <button id="ldx-offset-reset" class="ldx-btn ldx-btn-reset">重置</button>
+                                <button id="ldx-offset-reset" class="ldx-btn ldx-btn-reset" title="尾部对齐：偏移 = 视频时长 - 最后一条弹幕时间，使最后一条弹幕恰好出现在视频结尾">尾部对齐</button>
                             </div>
                             <div class="ldx-chip-grid">
                                 <button class="ldx-chip" id="ldx-offset-m5">-5s</button>
@@ -2964,6 +3019,11 @@
                         <label class="ldx-align-toggle" style="margin-bottom:8px" title="关闭后不匹配高亮用户，已添加的列表保留；重新开启立即生效">
                             <input type="checkbox" id="ldx-hl-enabled">启用高亮
                         </label>
+                        <div class="ldx-hl-sortbar">
+                            <span>排序</span>
+                            <button class="ldx-sort-chip" data-sort="added">添加时间</button>
+                            <button class="ldx-sort-chip" data-sort="lastSeen">最近出现</button>
+                        </div>
                         <div class="ldx-modal-add">
                             <input type="text" id="ldx-hl-input" class="ldx-input" placeholder="输入 UID" autocomplete="off">
                             <button id="ldx-hl-add" class="ldx-btn ldx-btn-green">添加</button>
@@ -3370,7 +3430,15 @@
             offsetInput.addEventListener('change', (e) => {
                 updateFineTuneOffset(parseFloat(e.target.value));
             });
-            document.getElementById('ldx-offset-reset').addEventListener('click', () => updateFineTuneOffset(0.0));
+            // 尾部对齐：偏移 = 视频时长 - 最后一条弹幕时间（danmakuList 已按时间排序），复用
+            // updateFineTuneOffset 的归整/持久化/配对偏移/软重置全链路
+            document.getElementById('ldx-offset-reset').addEventListener('click', () => {
+                if (!videoElement || !isFinite(videoElement.duration) || !danmakuList.length) {
+                    alert('尾部对齐需要：已载入弹幕且视频时长可用');
+                    return;
+                }
+                updateFineTuneOffset(videoElement.duration - danmakuList[danmakuList.length - 1].time);
+            });
             document.getElementById('ldx-offset-m5').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset - 5.0));
             document.getElementById('ldx-offset-p5').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset + 5.0));
             document.getElementById('ldx-offset-m05').addEventListener('click', () => updateFineTuneOffset(fineTuneOffset - 1.0));
@@ -3443,6 +3511,16 @@
             document.body.appendChild(hlModal);
             function renderHlList() {
                 hlList.innerHTML = '';
+                // 按配置键降序（新/近在前），无记录的沉底
+                const sortKey = cfgHlSort === 'lastSeen' ? 'lastSeen' : 'added';
+                const sorted = hlUsers.slice().sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
+                // 手动拼接：toLocaleString 的日期分隔符由 locale 决定（zh-CN 是 /），这里统一用 -
+                const fmtT = (t) => {
+                    if (!t) return '—';
+                    const d = new Date(t);
+                    const p2 = (n) => String(n).padStart(2, '0');
+                    return (d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+                };
                 if (!hlUsers.length) {
                     const empty = document.createElement('div');
                     empty.className = 'ldx-modal-hint';
@@ -3451,9 +3529,10 @@
                     hlList.appendChild(empty);
                     return;
                 }
-                for (const u of hlUsers) {
+                for (const u of sorted) {
                     const row = document.createElement('div');
                     row.className = 'ldx-hl-row';
+                    row.title = '最近出现: ' + fmtT(u.lastSeen) + '  ·  添加: ' + fmtT(u.added);
                     const uid = document.createElement('span');
                     uid.className = 'uid';
                     uid.textContent = u.uid;
@@ -3480,6 +3559,7 @@
                     renderHlList();
                     hlInput.value = '';
                     hlEnabledCheck.checked = cfgHlEnabled;
+                    hlModal.querySelectorAll('.ldx-sort-chip').forEach(c => c.classList.toggle('active', c.dataset.sort === cfgHlSort));
                     hlModal.classList.remove('hidden');
                 } else {
                     hlModal.classList.add('hidden');
@@ -3531,7 +3611,7 @@
                 if (hlUsers.some(u => String(u.uid) === uid)) { hlInput.value = ''; return; }
                 // 从当前载入的弹幕里反查该 uid 的昵称自动关联；查不到先空着，播放到时自动补
                 const hit = danmakuList.find(d => d.uid && String(d.uid) === uid && d.user);
-                hlUsers.push({ uid, name: hit ? hit.user : '' });
+                hlUsers.push({ uid, name: hit ? hit.user : '', added: Date.now(), lastSeen: 0 });
                 saveHlUsers();
                 hlInput.value = '';
                 renderHlList();
@@ -3540,12 +3620,32 @@
             hlInput.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') addHlUser();
             });
-            // 刷新昵称：从当前弹幕按 UID 反查，批量更新列表（换载入别的视频后可补齐/修正昵称）
+            // 排序切换：记忆选择并重渲染列表
+            hlModal.querySelectorAll('.ldx-sort-chip').forEach((chip) => {
+                chip.addEventListener('click', () => {
+                    cfgHlSort = chip.dataset.sort;
+                    saveLiveCfg();
+                    hlModal.querySelectorAll('.ldx-sort-chip').forEach(c => c.classList.toggle('active', c === chip));
+                    renderHlList();
+                });
+            });
+            // 刷新昵称 + 最近出现：单次遍历弹幕按 UID 聚合（该用户最后一条弹幕的昵称与绝对时间戳）
             document.getElementById('ldx-hl-refresh').addEventListener('click', (e) => {
+                const agg = new Map();  // uid -> { name: 最新昵称, maxAbs: 最后发言的绝对时间戳 }
+                for (const d of danmakuList) {
+                    if (!d.uid) continue;
+                    const k = String(d.uid);
+                    let a = agg.get(k);
+                    if (!a) { a = { name: null, maxAbs: 0 }; agg.set(k, a); }
+                    if (d.absTs && d.absTs >= a.maxAbs) { a.maxAbs = d.absTs; if (d.user) a.name = d.user; }
+                    if (!a.name && d.user) a.name = d.user;
+                }
                 let updated = 0;
                 for (const u of hlUsers) {
-                    const hit = danmakuList.find(d => d.uid && String(d.uid) === String(u.uid) && d.user);
-                    if (hit && hit.user !== u.name) { u.name = hit.user; updated++; }
+                    const a = agg.get(String(u.uid));
+                    if (!a) continue;   // 当前弹幕里没有该用户: 保持原样
+                    if (a.name && a.name !== u.name) { u.name = a.name; updated++; }
+                    if (a.maxAbs && a.maxAbs > (u.lastSeen || 0)) { u.lastSeen = a.maxAbs; updated++; }
                 }
                 if (updated) saveHlUsers();
                 renderHlList();
