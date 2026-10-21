@@ -2,7 +2,7 @@
 // @name         Bilibili 本地弹幕（美化版）
 // @name:en      Bilibili Local Danmaku (Beautified)
 // @namespace    https://github.com/YourName/bilibili-local-danmaku
-// @version      1.4.0
+// @version      1.6.0
 // @description  手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、弹幕搜索定点对齐、密度图与进度条预览。
 // @description:en Load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), search-based alignment, density graph & progress preview.
 // @author       Codex
@@ -2144,11 +2144,18 @@
                     if (isFinite(p)) {
                         if (cointype === '金瓜子') priceYuan = p / 1000;
                         else if (cointype === '银瓜子') priceYuan = 0;
-                        // 其余 cointype（舰长/提督/总督等）部分源写元价（198）、部分写千分之一元（198000），
-                        // cointype 无法区分单位。以 10 万为界启发式：真实元价上限总督 19998/SC 5000，
-                        // 永远到不了 10 万；瓜子价 ≥10 万即 ≥100 元（舰长起步 198）
-                        else if (p >= 100000) priceYuan = p / 1000;
-                        else priceYuan = p;
+                        else {
+                            // 舰长/提督/总督：cointype 被填为事件名且无单位标注，部分源写元（198）、
+                            // 部分写瓜子（198000），还有折扣券实付极低（如舰长券 1900 瓜子=1.9 元）。
+                            // 实付不会高于原价（折扣只会更低），以 原价×数量 为分界判断单位：
+                            // 超过原价上限必是瓜子（/1000），未超按元
+                            const caps = { '舰长': 198, '提督': 1998, '总督': 19998 };
+                            const cap = (caps[cointype] || caps[giftName] || 0)
+                                * (parseInt(count, 10) || 1);
+                            // 已知类型: 超过原价上限即瓜子单位；未知类型: 保留 10 万兜底
+                            priceYuan = (cap && p > cap) ? p / 1000
+                                : (!cap && p >= 100000 ? p / 1000 : p);
+                        }
                     }
                 }
                 // 部分录制工具（如 danmakus.com）把上舰记录为 gift（giftname=舰长/提督/总督），转成舰长事件走舰长样式
@@ -2186,11 +2193,16 @@
                     if (isFinite(p)) {
                         if (cointype === '金瓜子') priceYuan = p / 1000;
                         else if (cointype === '银瓜子') priceYuan = 0;
-                        // 其余 cointype（舰长/提督/总督等）部分源写元价（198）、部分写千分之一元（198000），
-                        // cointype 无法区分单位。以 10 万为界启发式：真实元价上限总督 19998/SC 5000，
-                        // 永远到不了 10 万；瓜子价 ≥10 万即 ≥100 元（舰长起步 198）
-                        else if (p >= 100000) priceYuan = p / 1000;
-                        else priceYuan = p;
+                        else {
+                            // 舰长/提督/总督：cointype 被填为事件名且无单位标注，部分源写元（198）、
+                            // 部分写瓜子（198000），还有折扣券实付极低（如舰长券 1900 瓜子=1.9 元）。
+                            // 实付不会高于原价（折扣只会更低），以 原价×数量 为分界判断单位：
+                            // 超过原价上限必是瓜子（/1000），未超按元
+                            const caps = { '舰长': 198, '提督': 1998, '总督': 19998 };
+                            const cap = (caps[cointype] || caps[giftName] || 0)
+                                * (parseInt(count, 10) || 1);
+                            priceYuan = (cap && p > cap) ? p / 1000 : p;
+                        }
                     }
                 }
                 // count 是一次上舰的月数（如连续包月一次买 N 个月），>1 时追加 " x N"，1 或缺字段默认 1 不显示
@@ -2298,6 +2310,7 @@
                     danmakuOverlay.style.fontSize = cfgDmFontSize + 'px';
                     videoWrap.appendChild(danmakuOverlay);
                     if (danmakuList.length > 0) {
+                        console.log('[本地弹幕] 清屏: overlay 被页面移除, 已重建（播放器 DOM 重建）');
                         triggerFullDanmakuReset(videoElement.currentTime);
                     }
                 }
@@ -2335,6 +2348,7 @@
 
         videoElement.addEventListener('seeked', () => {
             // seek 一律清屏重排：软重置试验过（残影+新弹幕两代同屏、加速波观感混乱），回退为硬清
+            console.log('[本地弹幕] 清屏: seeked 事件（含播放器内部触发的非用户 seek）');
             triggerFullDanmakuReset(videoElement.currentTime);
         });
 
@@ -2370,6 +2384,7 @@
                 danmakuOverlay = existingOverlay;
             }
             if (danmakuList.length > 0) {
+                console.log('[本地弹幕] 清屏: play 事件（播放器重连/自动换源）');
                 triggerFullDanmakuReset(videoElement.currentTime);
             }
         });
@@ -2386,6 +2401,7 @@
 
         if (danmakuList.length > 0) {
             redrawDensityGraph();
+            console.log('[本地弹幕] 清屏: loadedmetadata（视频元数据重载/换源）');
             triggerFullDanmakuReset(videoElement.currentTime);
         }
     }
