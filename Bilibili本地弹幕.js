@@ -2,7 +2,7 @@
 // @name         Bilibili 本地弹幕（美化版）
 // @name:en      Bilibili Local Danmaku (Beautified)
 // @namespace    https://github.com/YourName/bilibili-local-danmaku
-// @version      1.9.3
+// @version      2.0.0
 // @description  手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、弹幕搜索定点对齐、密度图与进度条预览。
 // @description:en Load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), search-based alignment, density graph & progress preview.
 // @author       Codex
@@ -515,6 +515,8 @@
     function resolveRichImage(token, inner) {
         const mapped = EMOTE_LIVE_MAP[token];
         if (mapped) return mapped;
+        // URL 解析本身有成本，普通 [文字] 不进入该分支
+        if (!/^https?:\/\//i.test(inner)) return '';
         try {
             const url = new URL(inner, 'https://www.bilibili.com/');
             if (url.protocol === 'http:') url.protocol = 'https:';
@@ -1369,6 +1371,12 @@
             object-fit: contain;
             vertical-align: -0.35em;
             border-radius: 3px;
+        }
+        .ldx-dm-count {
+            margin-left: 0.35em;
+        }
+        .ldx-dm-count:empty {
+            display: none;
         }
         .ldx-dm.dm-type-sc {
             color: #ffe066;
@@ -2716,17 +2724,20 @@
             displayText = toSimplified(displayText);
         }
 
-        // 富弹幕只解析一次，既用于合并判断，也直接传给渲染，避免重复扫描
-        const richContent = buildRichDanmaku(displayText);
-        // 富弹幕（图片/表情码）不参与合并：合并的 textContent 更新会把内联图清成纯文本
-        if (dm.type === 'danmaku' && !richContent) {
+        // 整条内容相同即合并；命中缓存时无需重新解析富内容或重建图片
+        if (dm.type === 'danmaku') {
             const cacheEntry = danmakuCache.get(displayText);
             const now = virtualDmTime;
             if (cacheEntry && (now - cacheEntry.lastTime < MERGE_DURATION)) {
                 cacheEntry.count++;
                 cacheEntry.lastTime = now;
                 const el = cacheEntry.element;
-                el.textContent = displayText + ` (x${cacheEntry.count})`;
+                // 富弹幕保留图片 DOM，只更新独立计数节点
+                if (cacheEntry.countNode) {
+                    cacheEntry.countNode.textContent = `(x${cacheEntry.count})`;
+                } else {
+                    el.textContent = displayText + ` (x${cacheEntry.count})`;
+                }
                 el.style.setProperty('--ldx-scale', mergeScale(cacheEntry.count));
                 // 合并条数越多，动画越长，弹幕在屏幕上停留越久；log2 增长比 log10 陡，高合并数时驻留提升更明显
                 const extraDuration = Math.log2(cacheEntry.count) * DM_MERGE_DURATION_BONUS;
@@ -2739,8 +2750,16 @@
             }
         }
 
+        // 未命中缓存时才解析富弹幕，后续相同内容直接复用这个元素
+        const richContent = buildRichDanmaku(displayText);
         const el = showDanmaku(displayText, dm.type, richContent);
         if (!el) return;
+        let mergeCountNode = null;
+        if (dm.type === 'danmaku' && richContent) {
+            mergeCountNode = document.createElement('span');
+            mergeCountNode.className = 'ldx-dm-count';
+            el.appendChild(mergeCountNode);
+        }
 
         // 高亮用户样式：普通弹幕覆盖为玫红并加粗发光，层级抬到普通(1)/常规合并(10+)之上、礼物(20)/SC(50)之下；
         // SC/礼物/上舰保留类型识别色与类型层级，只叠加发光
@@ -2784,11 +2803,12 @@
             el.style.animationDuration = duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's';
         }
 
-        if (dm.type === 'danmaku' && !richContent) {
+        if (dm.type === 'danmaku') {
             danmakuCache.set(displayText, {
                 count: 1,
                 element: el,
-                lastTime: virtualDmTime
+                lastTime: virtualDmTime,
+                countNode: mergeCountNode
             });
         }
 
