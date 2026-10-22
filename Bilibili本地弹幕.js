@@ -2,7 +2,7 @@
 // @name         Bilibili 本地弹幕（美化版）
 // @name:en      Bilibili Local Danmaku (Beautified)
 // @namespace    https://github.com/YourName/bilibili-local-danmaku
-// @version      1.9.0
+// @version      1.9.3
 // @description  手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、弹幕搜索定点对齐、密度图与进度条预览。
 // @description:en Load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), search-based alignment, density graph & progress preview.
 // @author       Codex
@@ -189,8 +189,8 @@
         let cleaned = name.replace(/^录制-\d+-/, '');
         cleaned = cleaned.replace(/^(\d{8}-\d{6})-\d+-/, '$1-');
         // danmakus 新版默认名：主播名_房间号_开播日期-开始时间_标题.xml -> 开播日期_标题.xml
-        // （主播名可含任意字符，锚定第 2 段纯数字房间号 + 第 3 段日期-时间形态；时间与标题一并去除）
-        cleaned = cleaned.replace(/^[^_]+_\d+_(20\d{6})-\d{6}_/, '$1_');
+        // 主播名可能含下划线，取第一条“纯数字房间号 + 开播日期-时间”分段
+        cleaned = cleaned.replace(/^.+?_\d+_(20\d{6})-\d{6}_/, '$1_');
         cleaned = cleaned.replace(/^\d{13}_(\d{13})_/, (_, start) => {
             const d = new Date(Number(start));
             const p = (n) => String(n).padStart(2, '0');
@@ -421,8 +421,6 @@
     }
 
     // ==================== 富弹幕（[图片URL] 与 [比心] 等直播表情码，渲染为内联图片） ====================
-    // 仅识别 B 站表情 CDN 的图片链接且限定图片扩展名，避免任意 URL 被当作图片加载
-    const IMG_DANMAKU_RE = /\[(https:\/\/i0\.hdslb\.com\/[^\[\]]+?\.(?:png|jpe?g|gif|webp|apng))\]/;
     // 直播默认表情映射（[比心] -> CDN 小图），来源 bili-danmu-plus1 项目的静态表
     const EMOTE_LIVE_MAP = {
         "[藏狐]": 'https://i0.hdslb.com/bfs/live/05ef7849e7313e9c32887df922613a7c1ad27f12.png@130w.webp',
@@ -508,36 +506,56 @@
         "[瓜子]": 'https://i0.hdslb.com/bfs/live/fd35718ac5a278fd05fe5287ebd41de40a59259d.png@130w.webp',
         "[吃瓜]": 'https://i0.hdslb.com/bfs/live/ffb53c252b085d042173379ac724694ce3196194.png@130w.webp'
     };
-    // 组合匹配：图片 URL（组1）或已映射表情码（组2）；test 版无 g 标志避免 lastIndex 副作用
-    let emoteExecRe = null, emoteTestRe = null;
-    function emoteRe() {
-        if (!emoteExecRe) {
-            const codes = Object.keys(EMOTE_LIVE_MAP).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-            // 字符串形式构建（'\\[' 在 JS 字符串中即正则的 \[），反斜杠必须双写
-            emoteExecRe = new RegExp('\\[(https:\\/\\/i0\\.hdslb\\.com\\/[^\\[\\]]+?\\.(?:png|jpe?g|gif|webp|apng))\\]|(' + codes + ')', 'g');
-            emoteTestRe = new RegExp(emoteExecRe.source);
+    // 只匹配方括号候选内容；具体是表情码还是图片 URL 交给 Map / URL 校验
+    const RICH_TOKEN_RE = /\[([^\[\]\r\n]{1,512})\]/g;
+    const RICH_IMAGE_HOST_RE = /^i[0-3]\.hdslb\.com$/i;
+    const RICH_IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|apng)$/i;
+    const failedRichImages = new Set();
+
+    function resolveRichImage(token, inner) {
+        const mapped = EMOTE_LIVE_MAP[token];
+        if (mapped) return mapped;
+        try {
+            const url = new URL(inner, 'https://www.bilibili.com/');
+            if (url.protocol === 'http:') url.protocol = 'https:';
+            if (url.protocol !== 'https:' || !RICH_IMAGE_HOST_RE.test(url.hostname)) return '';
+            if (!RICH_IMAGE_EXT_RE.test(url.pathname)) return '';
+            return url.href;
+        } catch (e) {
+            return '';
         }
-        return emoteExecRe;
     }
+
     // 富弹幕构建：把 [图片URL] / [表情码] 替换为内联 img，其余文本保持纯文本节点（不用 innerHTML 防注入）。
     // 无富内容返回 null（调用方退回纯文本）
     function buildRichDanmaku(text) {
-        const re = new RegExp(emoteRe().source, 'g');
+        // 快速预判: 绝大多数普通弹幕不含 "[", 一次字符串搜索替代整场正则扫描
+        if (!text.includes('[')) return null;
+        RICH_TOKEN_RE.lastIndex = 0;
         let last = 0, mm, has = false;
         const frag = document.createDocumentFragment();
-        while ((mm = re.exec(text))) {
+        while ((mm = RICH_TOKEN_RE.exec(text))) {
+            const raw = mm[0];
+            const srcUrl = resolveRichImage(raw, mm[1]);
+            // 无法识别或已失败的图片保留原始方括号文本，不中断其他富内容
+            if (!srcUrl || failedRichImages.has(srcUrl)) continue;
             if (mm.index > last) frag.appendChild(document.createTextNode(text.slice(last, mm.index)));
             const img = document.createElement('img');
             img.className = 'ldx-dm-img';
-            if (mm[1]) img.src = mm[1];
-            else { img.src = EMOTE_LIVE_MAP[mm[2]] || ''; img.alt = mm[0]; }
-            img.addEventListener('error', () => img.replaceWith(document.createTextNode(mm[0])));
+            img.alt = raw;
+            img.decoding = 'async';
+            img.addEventListener('error', () => {
+                failedRichImages.add(srcUrl);
+                img.replaceWith(document.createTextNode(raw));
+            }, { once: true });
+            img.src = srcUrl;   // 先绑事件再触发加载
             frag.appendChild(img);
             has = true;
-            last = mm.index + mm[0].length;
+            last = mm.index + raw.length;
         }
         if (!has) return null;
         if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        RICH_TOKEN_RE.lastIndex = 0;   // 复位共享正则的匹配状态, 避免污染下一次调用
         return frag;
     }
 
@@ -1347,6 +1365,8 @@
         }
         .ldx-dm-img {
             height: 1.4em;
+            max-width: 6em;
+            object-fit: contain;
             vertical-align: -0.35em;
             border-radius: 3px;
         }
@@ -1979,16 +1999,44 @@
             return response.text();
         }
 
-        function firstJsonScript(html, pattern) {
-            const match = html.match(pattern);
-            return match ? JSON.parse(match[1]) : null;
+        function jsonObjectAfter(scriptText, marker) {
+            const markerIndex = scriptText.indexOf(marker);
+            if (markerIndex === -1) return null;
+            const start = scriptText.indexOf('{', markerIndex + marker.length);
+            if (start === -1) return null;
+
+            // 扫描配对花括号，并跳过字符串中的括号，避免页面 JSON 里的 "}" 提前截断
+            let depth = 0, quote = '', escaped = false;
+            for (let i = start; i < scriptText.length; i++) {
+                const ch = scriptText[i];
+                if (quote) {
+                    if (escaped) escaped = false;
+                    else if (ch === '\\') escaped = true;
+                    else if (ch === quote) quote = '';
+                    continue;
+                }
+                if (ch === '"' || ch === "'") {
+                    quote = ch;
+                } else if (ch === '{') {
+                    depth++;
+                } else if (ch === '}' && --depth === 0) {
+                    try {
+                        return JSON.parse(scriptText.slice(start, i + 1));
+                    } catch (e) {
+                        return null;
+                    }
+                }
+            }
+            return null;
         }
 
         async function fetchInfo(ep) {
             const html = await getText(`https://www.bilibili.com/bangumi/play/${ep}/`);
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const scripts = Array.from(doc.querySelectorAll('script'));
             try {
-                const json = firstJsonScript(html, /const playurlSSRData = (\{.*?\})\s*<\/script>/s)
-                    || firstJsonScript(html, /const playurlSSRData = (\{.*?\})\s*;/s);
+                const playScript = scripts.find((script) => script.textContent.includes('playurlSSRData'));
+                const json = playScript ? jsonObjectAfter(playScript.textContent, 'playurlSSRData') : null;
                 const result = json?.data?.result;
                 const epInfo = result?.play_view_business_info?.episode_info;
                 const ogvInfo = result?.supplement?.ogv_episode_info;
@@ -2005,7 +2053,8 @@
                 console.warn("[弹幕下载] playurlSSRData 解析失败，尝试 __NEXT_DATA__", error);
             }
             try {
-                const json = firstJsonScript(html, /<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
+                const nextScript = doc.querySelector('script#__NEXT_DATA__');
+                const json = nextScript ? JSON.parse(nextScript.textContent) : null;
                 const queries = json?.props?.pageProps?.dehydratedState?.queries || [];
                 const seasonData = queries.find((query) => query.state?.data?.seasonInfo)?.state?.data;
                 const playData = queries.find((query) => query.state?.data?.playInfo)?.state?.data;
@@ -2139,7 +2188,8 @@
 
     function sanitizeBrokenXml(xmlStr) {
         // 部分录制工具（如 danmakus.com）导出的 XML 中，弹幕/SC 等文本含未转义的 < 和 &（常见于颜文字），会导致整个文档解析失败；只转义内容标签文本节点内的字符
-        return xmlStr.replace(/(<(d|sc|gift|guard)\b[^>]*>)([\s\S]*?)(<\/\2\s*>)/g, (m, open, tag, text, close) =>
+        // 起始标签允许 > 出现在属性值内，避免 raw JSON 里的 > 被当成标签结尾
+        return xmlStr.replace(/(<(d|sc|gift|guard)\b(?:[^>"']|"[^"]*"|'[^']*')*>)([\s\S]*?)(<\/\2\s*>)/g, (m, open, tag, text, close) =>
             open + text.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;').replace(/</g, '&lt;') + close
         );
     }
@@ -2325,8 +2375,10 @@
                             // 实付不会高于原价（折扣只会更低），以 原价×数量 为分界判断单位：
                             // 超过原价上限必是瓜子（/1000），未超按元
                             const caps = { '舰长': 198, '提督': 1998, '总督': 19998 };
-                            const cap = (caps[cointype] || caps[giftName] || 0)
-                                * (parseInt(count, 10) || 1);
+                            // guard 自身上下文：按 level 生成名称（无 giftName/count 变量可引用）
+                            const guardName = lv === 3 ? '总督' : lv === 2 ? '提督' : '舰长';
+                            const cap = (caps[guardName] || 0)
+                                * (parseInt(item.getAttribute('count'), 10) || 1);
                             priceYuan = (cap && p > cap) ? p / 1000 : p;
                         }
                     }
@@ -2664,9 +2716,10 @@
             displayText = toSimplified(displayText);
         }
 
+        // 富弹幕只解析一次，既用于合并判断，也直接传给渲染，避免重复扫描
+        const richContent = buildRichDanmaku(displayText);
         // 富弹幕（图片/表情码）不参与合并：合并的 textContent 更新会把内联图清成纯文本
-        emoteRe();
-        if (dm.type === 'danmaku' && !emoteTestRe.test(displayText)) {
+        if (dm.type === 'danmaku' && !richContent) {
             const cacheEntry = danmakuCache.get(displayText);
             const now = virtualDmTime;
             if (cacheEntry && (now - cacheEntry.lastTime < MERGE_DURATION)) {
@@ -2686,7 +2739,7 @@
             }
         }
 
-        const el = showDanmaku(displayText, dm.type);
+        const el = showDanmaku(displayText, dm.type, richContent);
         if (!el) return;
 
         // 高亮用户样式：普通弹幕覆盖为玫红并加粗发光，层级抬到普通(1)/常规合并(10+)之上、礼物(20)/SC(50)之下；
@@ -2731,7 +2784,7 @@
             el.style.animationDuration = duration + 's, ' + DM_GUARD_GLOW_PERIOD + 's';
         }
 
-        if (dm.type === 'danmaku') {
+        if (dm.type === 'danmaku' && !richContent) {
             danmakuCache.set(displayText, {
                 count: 1,
                 element: el,
@@ -2750,7 +2803,7 @@
         });
     }
 
-    function showDanmaku(text, type) {
+    function showDanmaku(text, type, richContent = undefined) {
         if (!danmakuOverlay) return null;
         if (!danmakuOverlay.isConnected) {
             const currentWrap = document.querySelector('.bpx-player-video-wrap');
@@ -2769,7 +2822,7 @@
         }
 
         // 富弹幕：[图片URL] / [表情码] 渲染为内联图，DOM API 分段构建（不用 innerHTML 防止弹幕文本注入）
-        const rich = buildRichDanmaku(text);
+        const rich = richContent === undefined ? buildRichDanmaku(text) : richContent;
         if (rich) dm.appendChild(rich);
         else dm.textContent = text;
         // 普通弹幕应用自定义颜色，SC/礼物/舰长保留类型识别色
