@@ -2,7 +2,7 @@
 // @name         Bilibili 本地弹幕（美化版）
 // @name:en      Bilibili Local Danmaku (Beautified)
 // @namespace    https://github.com/YourName/bilibili-local-danmaku
-// @version      1.6.0
+// @version      1.9.0
 // @description  手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、弹幕搜索定点对齐、密度图与进度条预览。
 // @description:en Load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), search-based alignment, density graph & progress preview.
 // @author       Codex
@@ -418,6 +418,127 @@
             out += map.get(ch) || ch;
         }
         return out;
+    }
+
+    // ==================== 富弹幕（[图片URL] 与 [比心] 等直播表情码，渲染为内联图片） ====================
+    // 仅识别 B 站表情 CDN 的图片链接且限定图片扩展名，避免任意 URL 被当作图片加载
+    const IMG_DANMAKU_RE = /\[(https:\/\/i0\.hdslb\.com\/[^\[\]]+?\.(?:png|jpe?g|gif|webp|apng))\]/;
+    // 直播默认表情映射（[比心] -> CDN 小图），来源 bili-danmu-plus1 项目的静态表
+    const EMOTE_LIVE_MAP = {
+        "[藏狐]": 'https://i0.hdslb.com/bfs/live/05ef7849e7313e9c32887df922613a7c1ad27f12.png@130w.webp',
+        "[妙]": 'https://i0.hdslb.com/bfs/live/08f735d950a0fba267dda140673c9ab2edf6410d.png@130w.webp',
+        "[三星堆]": 'https://i0.hdslb.com/bfs/live/0a1ab3f0f2f2e29de35c702ac1ecfec7f90e325d.png@130w.webp',
+        "[OH]": 'https://i0.hdslb.com/bfs/live/0d5123cddf389302df6f605087189fd10919dc3c.png@130w.webp',
+        "[亲亲]": 'https://i0.hdslb.com/bfs/live/10662d9c0d6ddb3203ecf50e77788b959d4d1928.png@130w.webp',
+        "[防护]": 'https://i0.hdslb.com/bfs/live/17435e60dcc28ce306762103a2a646046ff10b0a.png@130w.webp',
+        "[呆]": 'https://i0.hdslb.com/bfs/live/179c7e2d232cd74f30b672e12fc728f8f62be9ec.png@130w.webp',
+        "[爱]": 'https://i0.hdslb.com/bfs/live/1daaa5d284dafaa16c51409447da851ff1ec557f.png@130w.webp',
+        "[摊手]": 'https://i0.hdslb.com/bfs/live/1e0a2baf088a34d56e2cc226b2de36a5f8d6c926.png@130w.webp',
+        "[囧]": 'https://i0.hdslb.com/bfs/live/204413d3cf330e122230dcc99d29056f2a60e6f2.png@130w.webp',
+        "[汤圆]": 'https://i0.hdslb.com/bfs/live/23ae12d3a71b9d7a22c8773343969fcbb94b20d0.png@130w.webp',
+        "[保佑]": 'https://i0.hdslb.com/bfs/live/241b13adb4933e38b7ea6f5204e0648725e76fbf.png@130w.webp',
+        "[泼水]": 'https://i0.hdslb.com/bfs/live/29533893115c4609a4af336f49060ea13173ca78.png@130w.webp',
+        "[吐了啊]": 'https://i0.hdslb.com/bfs/live/2b6b4cc33be42c3257dc1f6ef3a39d666b6b4b1a.png@130w.webp',
+        "[生气]": 'https://i0.hdslb.com/bfs/live/2c69dad2e5c0f72f01b92746bc9d148aee1993b2.png@130w.webp',
+        "[赞]": 'https://i0.hdslb.com/bfs/live/2dd666d3651bafe8683acf770b7f4163a5f49809.png@130w.webp',
+        "[响指]": 'https://i0.hdslb.com/bfs/live/3b2fedf09b0ac79679b5a47f5eb3e8a38e702387.png@130w.webp',
+        "[抱拳]": 'https://i0.hdslb.com/bfs/live/3f170894dd08827ee293afcb5a3d2b60aecdb5b1.png@130w.webp',
+        "[撇嘴]": 'https://i0.hdslb.com/bfs/live/4255ce6ed5d15b60311728a803d03dd9a24366b2.png@130w.webp',
+        "[dog]": 'https://i0.hdslb.com/bfs/live/4428c84e694fbf4e0ef6c06e958d9352c3582740.png@130w.webp',
+        "[无语]": 'https://i0.hdslb.com/bfs/live/4781a77be9c8f0d4658274eb4e3012c47a159f23.png@130w.webp',
+        "[疼]": 'https://i0.hdslb.com/bfs/live/492b10d03545b7863919033db7d1ae3ef342df2f.png@130w.webp',
+        "[比心]": 'https://i0.hdslb.com/bfs/live/4e029593562283f00d39b99e0557878c4199c71d.png@130w.webp',
+        "[跪了]": 'https://i0.hdslb.com/bfs/live/4f2155b108047d60c1fa9dccdc4d7abba18379a0.png@130w.webp',
+        "[难过]": 'https://i0.hdslb.com/bfs/live/5776481e380648c0fb3d4ad6173475f69f1ce149.png@130w.webp',
+        "[波吉]": 'https://i0.hdslb.com/bfs/live/57dee478868ed9f1ce3cf25a36bc50bde489c404.png@130w.webp',
+        "[奸笑]": 'https://i0.hdslb.com/bfs/live/5935e6a4103d024955f749d428311f39e120a58a.png@130w.webp',
+        "[鬼魂]": 'https://i0.hdslb.com/bfs/live/5d86d55ba9a2f99856b523d8311cf75cfdcccdbc.png@130w.webp',
+        "[墨镜]": 'https://i0.hdslb.com/bfs/live/5e01c237642c8b662a69e21b8e0fbe6e7dbc2aa1.png@130w.webp',
+        "[牛]": 'https://i0.hdslb.com/bfs/live/5e61223561203c50340b4c9b41ba7e4b05e48ae2.png@130w.webp',
+        "[不行]": 'https://i0.hdslb.com/bfs/live/607f74ccf5eec7d2b17d91b9bb36be61a5dd196b.png@130w.webp',
+        "[哇]": 'https://i0.hdslb.com/bfs/live/650c3e22c06edcbca9756365754d38952fc019c3.png@130w.webp',
+        "[委屈]": 'https://i0.hdslb.com/bfs/live/69312e99a00d1db2de34ef2db9220c5686643a3f.png@130w.webp',
+        "[热]": 'https://i0.hdslb.com/bfs/live/6df760280b17a6cbac8c1874d357298f982ba4cf.png@130w.webp',
+        "[哈欠]": 'https://i0.hdslb.com/bfs/live/6e496946725cd66e7ff1b53021bf1cc0fc240288.png@130w.webp',
+        "[花]": 'https://i0.hdslb.com/bfs/live/7dd2ef03e13998575e4d8a803c6e12909f94e72b.png@130w.webp',
+        "[白眼]": 'https://i0.hdslb.com/bfs/live/7fa907ae85fa6327a0466e123aee1ac32d7c85f7.png@130w.webp',
+        "[大哭]": 'https://i0.hdslb.com/bfs/live/816402551e6ce30d08b37a917f76dea8851fe529.png@130w.webp',
+        "[生病]": 'https://i0.hdslb.com/bfs/live/84c92239591e5ece0f986c75a39050a5c61c803c.png@130w.webp',
+        "[调皮]": 'https://i0.hdslb.com/bfs/live/84fe12ecde5d3875e1090d83ac9027cb7d7fba9f.png@130w.webp',
+        "[滑稽]": 'https://i0.hdslb.com/bfs/live/8624fd172037573c8600b2597e3731ef0e5ea983.png@130w.webp',
+        "[OK]": 'https://i0.hdslb.com/bfs/live/86268b09e35fbe4215815a28ef3cf25ec71c124f.png@130w.webp',
+        "[龇牙]": 'https://i0.hdslb.com/bfs/live/8b99266ea7b9e86cf9d25c3d1151d80c5ba5c9a1.png@130w.webp',
+        "[一般]": 'https://i0.hdslb.com/bfs/live/8d436de0c3701d87e4ca9c1be01c01b199ac198e.png@130w.webp',
+        "[可怜]": 'https://i0.hdslb.com/bfs/live/8e88e6a137463703e96d4f27629f878efa323456.png@130w.webp',
+        "[鼠]": 'https://i0.hdslb.com/bfs/live/98f842994035505c728e32e32045d649e371ecd6.png@130w.webp',
+        "[酸]": 'https://i0.hdslb.com/bfs/live/98fd92c6115b0d305f544b209c78ec322e4bb4ff.png@130w.webp',
+        "[惊喜]": 'https://i0.hdslb.com/bfs/live/9c75761c5b6e1ff59b29577deb8e6ad996b86bd7.png@130w.webp',
+        "[问号]": 'https://i0.hdslb.com/bfs/live/a0c456b6d9e3187399327828a9783901323bfdb5.png@130w.webp',
+        "[捂脸2]": 'https://i0.hdslb.com/bfs/live/a2ad0cc7e390a303f6d243821479452d31902a5f.png@130w.webp',
+        "[阴险]": 'https://i0.hdslb.com/bfs/live/a4df45c035b0ca0c58f162b5fb5058cf273d0d09.png@130w.webp',
+        "[虎年]": 'https://i0.hdslb.com/bfs/live/a51af0d7d9e60ce24f139c468a3853f9ba9bb184.png@130w.webp',
+        "[抓狂]": 'https://i0.hdslb.com/bfs/live/a7feb260bb5b15f97d7119b444fc698e82516b9f.png@130w.webp',
+        "[笑]": 'https://i0.hdslb.com/bfs/live/a91a27f83c38b5576f4cd08d4e11a2880de78918.png@130w.webp',
+        "[抱抱]": 'https://i0.hdslb.com/bfs/live/abddb0b621b389fc8c2322b1cfcf122d8936ba91.png@130w.webp',
+        "[流汗]": 'https://i0.hdslb.com/bfs/live/b00e2e02904096377061ec5f93bf0dd3321f1964.png@130w.webp',
+        "[手机]": 'https://i0.hdslb.com/bfs/live/b159f90431148a973824f596288e7ad6a8db014b.png@130w.webp',
+        "[喝彩]": 'https://i0.hdslb.com/bfs/live/b51824125d09923a4ca064f0c0b49fc97d3fab79.png@130w.webp',
+        "[傲娇]": 'https://i0.hdslb.com/bfs/live/b5b44f099059a1bafb2c2722cfe9a6f62c1dc531.png@130w.webp',
+        "[嘘]": 'https://i0.hdslb.com/bfs/live/b6226219384befa5da1d437cb2ff4ba06c303844.png@130w.webp',
+        "[金钱豹]": 'https://i0.hdslb.com/bfs/live/b6e8131897a9a718ee280f2510bfa92f1d84429b.png@130w.webp',
+        "[冷]": 'https://i0.hdslb.com/bfs/live/b804118a1bdb8f3bec67d9b108d5ade6e3aa93a9.png@130w.webp',
+        "[出窍]": 'https://i0.hdslb.com/bfs/live/bb8e95fa54512ffea07023ea4f2abee4a163e7a0.png@130w.webp',
+        "[惊讶]": 'https://i0.hdslb.com/bfs/live/bc26f29f62340091737c82109b8b91f32e6675ad.png@130w.webp',
+        "[歪嘴笑]": 'https://i0.hdslb.com/bfs/live/bea1f0497888f3e9056d3ce14ba452885a485c02.png@130w.webp',
+        "[嫌弃]": 'https://i0.hdslb.com/bfs/live/c409425ba1ad2c6534f0df7de350ba83a9c949e5.png@130w.webp',
+        "[笑哭]": 'https://i0.hdslb.com/bfs/live/c5436c6806c32b28d471bb23d42f0f8f164a187a.png@130w.webp',
+        "[吓]": 'https://i0.hdslb.com/bfs/live/c6bed64ffb78c97c93a83fbd22f6fdf951400f31.png@130w.webp',
+        "[给力]": 'https://i0.hdslb.com/bfs/live/d1ba5f4c54332a21ed2ca0dcecaedd2add587839.png@130w.webp',
+        "[鼓掌]": 'https://i0.hdslb.com/bfs/live/d581d0bc30c8f9712b46ec02303579840c72c42d.png@130w.webp',
+        "[害羞]": 'https://i0.hdslb.com/bfs/live/d8ce9b05c0e40cec61a15ba1979c8517edd270bf.png@130w.webp',
+        "[大笑]": 'https://i0.hdslb.com/bfs/live/e2589d086df0db8a7b5ca2b1273c02d31d4433d4.png@130w.webp',
+        "[偷笑]": 'https://i0.hdslb.com/bfs/live/e2ba16f947a23179cdc00420b71cc1d627d8ae25.png@130w.webp',
+        "[捂脸]": 'https://i0.hdslb.com/bfs/live/e6073c6849f735ae6cb7af3a20ff7dcec962b4c5.png@130w.webp',
+        "[耶]": 'https://i0.hdslb.com/bfs/live/eb2d84ba623e2335a48f73fb5bef87bcf53c1239.png@130w.webp',
+        "[再见]": 'https://i0.hdslb.com/bfs/live/f408e2af700adcc2baeca15510ef620bed8d4c43.png@130w.webp',
+        "[鼻子]": 'https://i0.hdslb.com/bfs/live/f4ed20a70d0cb85a22c0c59c628aedfe30566b37.png@130w.webp',
+        "[doge2]": 'https://i0.hdslb.com/bfs/live/f547cc853cf43e70f1e39095d9b3b5ac1bf70a8d.png@130w.webp',
+        "[微笑]": 'https://i0.hdslb.com/bfs/live/f605dd8229fa0115e57d2f16cb019da28545452b.png@130w.webp',
+        "[加油]": 'https://i0.hdslb.com/bfs/live/fbc3c8bc4152a65bbf4a9fd5a5d27710fbff2119.png@130w.webp',
+        "[瓜子]": 'https://i0.hdslb.com/bfs/live/fd35718ac5a278fd05fe5287ebd41de40a59259d.png@130w.webp',
+        "[吃瓜]": 'https://i0.hdslb.com/bfs/live/ffb53c252b085d042173379ac724694ce3196194.png@130w.webp'
+    };
+    // 组合匹配：图片 URL（组1）或已映射表情码（组2）；test 版无 g 标志避免 lastIndex 副作用
+    let emoteExecRe = null, emoteTestRe = null;
+    function emoteRe() {
+        if (!emoteExecRe) {
+            const codes = Object.keys(EMOTE_LIVE_MAP).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+            // 字符串形式构建（'\\[' 在 JS 字符串中即正则的 \[），反斜杠必须双写
+            emoteExecRe = new RegExp('\\[(https:\\/\\/i0\\.hdslb\\.com\\/[^\\[\\]]+?\\.(?:png|jpe?g|gif|webp|apng))\\]|(' + codes + ')', 'g');
+            emoteTestRe = new RegExp(emoteExecRe.source);
+        }
+        return emoteExecRe;
+    }
+    // 富弹幕构建：把 [图片URL] / [表情码] 替换为内联 img，其余文本保持纯文本节点（不用 innerHTML 防注入）。
+    // 无富内容返回 null（调用方退回纯文本）
+    function buildRichDanmaku(text) {
+        const re = new RegExp(emoteRe().source, 'g');
+        let last = 0, mm, has = false;
+        const frag = document.createDocumentFragment();
+        while ((mm = re.exec(text))) {
+            if (mm.index > last) frag.appendChild(document.createTextNode(text.slice(last, mm.index)));
+            const img = document.createElement('img');
+            img.className = 'ldx-dm-img';
+            if (mm[1]) img.src = mm[1];
+            else { img.src = EMOTE_LIVE_MAP[mm[2]] || ''; img.alt = mm[0]; }
+            img.addEventListener('error', () => img.replaceWith(document.createTextNode(mm[0])));
+            frag.appendChild(img);
+            has = true;
+            last = mm.index + mm[0].length;
+        }
+        if (!has) return null;
+        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        return frag;
     }
 
     // ==================== 高亮用户（按 UID 匹配，强制显示昵称+金色样式） ====================
@@ -1223,6 +1344,11 @@
             transform-origin: left center;
             z-index: 1;
             animation: ldx-scroll ${DM_SCROLL_DURATION}s linear;
+        }
+        .ldx-dm-img {
+            height: 1.4em;
+            vertical-align: -0.35em;
+            border-radius: 3px;
         }
         .ldx-dm.dm-type-sc {
             color: #ffe066;
@@ -2510,6 +2636,7 @@
                 const now = Date.now();
                 if (dm.absTs && dm.absTs > (rec.lastSeen || 0)) {
                     rec.lastSeen = dm.absTs;
+                    rec.lastText = dm.text;
                     saveHlUsersThrottled(now);
                 }
                 if (dm.user && dm.user !== rec.name) { rec.name = dm.user; saveHlUsers(); lastHlSave = now; }
@@ -2537,7 +2664,9 @@
             displayText = toSimplified(displayText);
         }
 
-        if (dm.type === 'danmaku') {
+        // 富弹幕（图片/表情码）不参与合并：合并的 textContent 更新会把内联图清成纯文本
+        emoteRe();
+        if (dm.type === 'danmaku' && !emoteTestRe.test(displayText)) {
             const cacheEntry = danmakuCache.get(displayText);
             const now = virtualDmTime;
             if (cacheEntry && (now - cacheEntry.lastTime < MERGE_DURATION)) {
@@ -2639,7 +2768,10 @@
             dm.classList.add(`dm-type-${type}`);
         }
 
-        dm.textContent = text;
+        // 富弹幕：[图片URL] / [表情码] 渲染为内联图，DOM API 分段构建（不用 innerHTML 防止弹幕文本注入）
+        const rich = buildRichDanmaku(text);
+        if (rich) dm.appendChild(rich);
+        else dm.textContent = text;
         // 普通弹幕应用自定义颜色，SC/礼物/舰长保留类型识别色
         if (!type || type === 'danmaku') {
             dm.style.color = cfgDmColor;
@@ -3548,7 +3680,8 @@
                 for (const u of sorted) {
                     const row = document.createElement('div');
                     row.className = 'ldx-hl-row';
-                    row.title = '最近出现: ' + fmtT(u.lastSeen) + '  ·  添加: ' + fmtT(u.added);
+                    row.title = '最近出现: ' + fmtT(u.lastSeen) + '  ·  添加: ' + fmtT(u.added)
+                        + (u.lastText ? '  ·  最后发言: ' + u.lastText : '');
                     const uid = document.createElement('span');
                     uid.className = 'uid';
                     uid.textContent = u.uid;
@@ -3647,13 +3780,13 @@
             });
             // 刷新昵称 + 最近出现：单次遍历弹幕按 UID 聚合（该用户最后一条弹幕的昵称与绝对时间戳）
             document.getElementById('ldx-hl-refresh').addEventListener('click', (e) => {
-                const agg = new Map();  // uid -> { name: 最新昵称, maxAbs: 最后发言的绝对时间戳 }
+                const agg = new Map();  // uid -> { name: 最新昵称, maxAbs: 最后发言的绝对时间戳, text: 该条弹幕文本 }
                 for (const d of danmakuList) {
                     if (!d.uid) continue;
                     const k = String(d.uid);
                     let a = agg.get(k);
-                    if (!a) { a = { name: null, maxAbs: 0 }; agg.set(k, a); }
-                    if (d.absTs && d.absTs >= a.maxAbs) { a.maxAbs = d.absTs; if (d.user) a.name = d.user; }
+                    if (!a) { a = { name: null, maxAbs: 0, text: null }; agg.set(k, a); }
+                    if (d.absTs && d.absTs >= a.maxAbs) { a.maxAbs = d.absTs; a.text = d.text; if (d.user) a.name = d.user; }
                     if (!a.name && d.user) a.name = d.user;
                 }
                 let updated = 0;
@@ -3661,7 +3794,7 @@
                     const a = agg.get(String(u.uid));
                     if (!a) continue;   // 当前弹幕里没有该用户: 保持原样
                     if (a.name && a.name !== u.name) { u.name = a.name; updated++; }
-                    if (a.maxAbs && a.maxAbs > (u.lastSeen || 0)) { u.lastSeen = a.maxAbs; updated++; }
+                    if (a.maxAbs && a.maxAbs > (u.lastSeen || 0)) { u.lastSeen = a.maxAbs; u.lastText = a.text || ''; updated++; }
                 }
                 if (updated) saveHlUsers();
                 renderHlList();
