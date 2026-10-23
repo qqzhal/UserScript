@@ -2,7 +2,7 @@
 // @name         Bilibili 本地弹幕（美化版）
 // @name:en      Bilibili Local Danmaku (Beautified)
 // @namespace    https://github.com/YourName/bilibili-local-danmaku
-// @version      2.0.0
+// @version      2.1.5
 // @description  手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、弹幕搜索定点对齐、密度图与进度条预览。
 // @description:en Load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), search-based alignment, density graph & progress preview.
 // @author       Codex
@@ -596,7 +596,7 @@
             top: 70px;
             left: -320px;
             width: 320px;
-            z-index: 10;
+            z-index: 2;
             transition: left 0.38s cubic-bezier(0.25, 0.8, 0.3, 1);
             font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
             color: #e8eaf0;
@@ -2162,13 +2162,20 @@
 
     // ==================== 弹幕加载与解析 ====================
     function loadXmlFromData(fileName, content, pairedOffset) {
-        // 历史文件：直接应用配对偏移；手动文件：走全局偏移记忆判断（>= 阈值重置为 0，< 阈值沿用）
+        // 偏移优先级：历史点开/同名导入直接用配对偏移；全新文件才走全局偏移记忆判断（>= 阈值重置为 0，< 阈值沿用）
+        // 同名导入视为同一视频（多为弹幕补全、时间轴一致），沿用历史条目的偏移；
+        // 否则大偏移会触发全局记忆重置归 0，且 addToHistory 同名去重会把旧偏移永久覆盖成 0
         let loadOffset = 0.0;
         if (typeof pairedOffset === 'number' && !isNaN(pairedOffset)) {
             loadOffset = pairedOffset;
         } else {
-            const savedOffset = parseFloat(localStorage.getItem(DM_OFFSET_KEY));
-            loadOffset = (!isNaN(savedOffset) && Math.abs(savedOffset) < OFFSET_MEMORY_LIMIT) ? savedOffset : 0.0;
+            const sameName = fileName && fileHistory.find(h => h.name === fileName);
+            if (sameName && typeof sameName.offset === 'number' && !isNaN(sameName.offset)) {
+                loadOffset = sameName.offset;
+            } else {
+                const savedOffset = parseFloat(localStorage.getItem(DM_OFFSET_KEY));
+                loadOffset = (!isNaN(savedOffset) && Math.abs(savedOffset) < OFFSET_MEMORY_LIMIT) ? savedOffset : 0.0;
+            }
         }
         fineTuneOffset = loadOffset;
         globalTimeOffset = loadOffset;
@@ -2256,6 +2263,9 @@
         }
 
         // 2. 解析普通弹幕
+        // 特殊事件（SC/礼物/上舰）通常只有相对 ts，用普通弹幕的
+        // “绝对发布时间 - 视频相对时间”反推录制基准，再换算特殊事件的绝对时间
+        let timeAnchor = null;
         for (let item of xmlDoc.getElementsByTagName('d')) {
             try {
                 const p = item.getAttribute('p').split(',');
@@ -2291,11 +2301,18 @@
                 }
 
                 if (!isNaN(time) && text) {
+                    if (!timeAnchor && absTs > 0) {
+                        timeAnchor = { absMs: absTs, relSec: time };
+                    }
                     // uid 仅明文属性源（如 danmakus.com）才有；哈希源为空串，不参与高亮用户匹配
                     danmakuList.push({ time, text, type: 'danmaku', user, uid, absTs, shown: false });
                 }
             } catch (e) {}
         }
+
+        const specialAbsTs = (relSec) => timeAnchor
+            ? Math.round(timeAnchor.absMs + (relSec - timeAnchor.relSec) * 1000)
+            : 0;
 
         // 3. 特殊弹幕：SC / Gift / Guard
         for (let item of xmlDoc.getElementsByTagName('sc')) {
@@ -2306,7 +2323,12 @@
                 const uid = item.getAttribute('uid') || String(rawData?.user_info?.uid || "");
                 const price = item.getAttribute('price') || "0";
                 const text = item.textContent;
-                if (!isNaN(time)) danmakuList.push({ time, text, type: 'sc', user, uid, price, shown: false });
+                if (!isNaN(time)) {
+                    danmakuList.push({
+                        time, text, type: 'sc', user, uid, price,
+                        absTs: specialAbsTs(time), shown: false
+                    });
+                }
             } catch (e) {}
         }
         for (let item of xmlDoc.getElementsByTagName('gift')) {
@@ -2349,12 +2371,18 @@
                     const gCount = parseInt(count, 10) || 1;
                     const gText = gCount > 1 ? `${guardText(gLevel)} x ${gCount}` : guardText(gLevel);
                     const gUid = item.getAttribute('uid') || String(rawData?.sender_uinfo?.uid || "");
-                    danmakuList.push({ time, text: gText, type: 'guard', level: gLevel, user, uid: gUid, priceYuan, shown: false });
+                    danmakuList.push({
+                        time, text: gText, type: 'guard', level: gLevel, user, uid: gUid, priceYuan,
+                        absTs: specialAbsTs(time), shown: false
+                    });
                 } else if (!isNaN(time)) {
                     const countNum = parseInt(count, 10);
                     // 数量为 1 时不追加个数后缀
                     const giftText = countNum > 1 ? `${giftName} x ${countNum}` : giftName;
-                    danmakuList.push({ time, text: giftText, type: 'gift', user, uid, count, priceYuan, shown: false });// 投喂了 
+                    danmakuList.push({
+                        time, text: giftText, type: 'gift', user, uid, count, priceYuan,
+                        absTs: specialAbsTs(time), shown: false
+                    });// 投喂了
                 }
             } catch (e) {}
         }
@@ -2395,7 +2423,12 @@
                 const gCount = parseInt(item.getAttribute('count'), 10) || 1;
                 const gText = gCount > 1 ? `${guardText(lv)} x ${gCount}` : guardText(lv);
                 const gUid = item.getAttribute('uid') || String(rawData?.uid || "");
-                if (!isNaN(time)) danmakuList.push({ time, text: gText, type: 'guard', level: lv, user, uid: gUid, priceYuan, shown: false });
+                if (!isNaN(time)) {
+                    danmakuList.push({
+                        time, text: gText, type: 'guard', level: lv, user, uid: gUid, priceYuan,
+                        absTs: specialAbsTs(time), shown: false
+                    });
+                }
             } catch (e) {}
         }
 
@@ -3391,18 +3424,22 @@
                     searchResults.innerHTML = '<div class="ldx-search-item" style="cursor:default">暂无弹幕数据</div>';
                     return;
                 }
-                // 同时匹配弹幕文本与用户名；SC/礼物/上舰记录的正文不含类型字样（类型前缀是显示时才拼接的），
-                // 因此这几个类型词按类型附加命中，避免"搜 SC/礼物/上舰 出不了记录"
+                // 多关键词 AND 搜索：按空白拆词，需同时命中全部关键词（单词行为与原先一致）；
+                // 每个词独立匹配弹幕文本 / 用户名 / UID；SC/礼物/上舰记录的正文不含类型字样
+                //（类型前缀是显示时才拼接的），因此"上舰"一词按类型附加命中
+                const keywords = query.split(/\s+/).filter(Boolean);
                 const matches = danmakuList.filter(d => {
                     if (!d.text) return false;
-                    if (d.text.includes(query)) return true;
-                    if (d.user && d.user.includes(query)) return true;
-                    // 数字关键词同时匹配 UID：直接搜某用户的全部发言/记录
-                    if (d.uid && String(d.uid).includes(query)) return true;
-                    if (query === '上舰' && d.type === 'guard') return true;
-                    //if (query.toLowerCase() === 'sc' && d.type === 'sc') return true;
-                    //if (query === '礼物' && d.type === 'gift') return true;
-                    return false;
+                    return keywords.every(kw => {
+                        if (d.text.includes(kw)) return true;
+                        if (d.user && d.user.includes(kw)) return true;
+                        // 数字关键词同时匹配 UID：直接搜某用户的全部发言/记录
+                        if (d.uid && String(d.uid).includes(kw)) return true;
+                        if (kw === '上舰' && d.type === 'guard') return true;
+                        //if (kw.toLowerCase() === 'sc' && d.type === 'sc') return true;
+                        //if (kw === '礼物' && d.type === 'gift') return true;
+                        return false;
+                    });
                 });
                 if (matches.length === 0) {
                     searchResults.style.display = 'block';
