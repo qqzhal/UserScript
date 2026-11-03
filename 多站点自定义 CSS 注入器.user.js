@@ -32,7 +32,11 @@
         {
             name: "B站 - 基础样式",
             rule: "bilibili.com",
-            css: `.adblock-tips { display: none !important; }`,
+            css: `
+            	.adblock-tips { display: none !important; }
+            	.video-card-ad-small{ display: none !important; }
+            	.ad-report,.strip-ad{ display: none !important; }
+            `,
         },
         {
             name: "X - 基础样式",

@@ -2,7 +2,7 @@
 // @name         Bilibili 本地弹幕（美化版）
 // @name:en      Bilibili Local Danmaku (Beautified)
 // @namespace    https://github.com/YourName/bilibili-local-danmaku
-// @version      2.1.5
+// @version      2.2.6
 // @description  手动加载 XML 弹幕、录播姬特殊弹幕（SC/礼物/舰长/ID）显示、弹幕搜索定点对齐、密度图与进度条预览。
 // @description:en Load local XML danmaku, live-recording special danmaku (SC/Gift/Guard), search-based alignment, density graph & progress preview.
 // @author       Codex
@@ -26,7 +26,9 @@
 (function() {
     'use strict';
 
-    console.log('%c[本地弹幕] 已启动', 'color:#fb7299;font-weight:bold;');
+    // 运行中查看控制台即可确认浏览器里跑的是哪一版（脚本管理器没装上/被缓存时，版本号不会变）
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '2.2.6';
+    console.log(`%c[本地弹幕] 已启动 v${SCRIPT_VERSION}`, 'color:#fb7299;font-weight:bold;');
 
     // ==================== 状态与常量 ====================
     let danmakuList = [];
@@ -50,6 +52,9 @@
     const DM_SCROLL_DURATION = 8.0;
     // 同文本合并窗口（秒）：窗口内重复弹幕合并为 xN 计数，不再单独占屏
     const MERGE_DURATION = 30.0;
+    // 直播「新表情」整段匹配：这类表情点击即发送、不能和文字混排，录播姬会存成不带方括号的纯名字
+    // （如 <d p="...">中奖喷雾</d>）。开启后整条弹幕与表情名完全一致就渲染成图，关掉则只认 [表情名] 写法
+    const DM_EXACT_EMOTE_MATCH = true;
     // 合并计数每翻一倍（x2→x4→x8…）额外增加的驻留秒数，调大则高合并档停留越久
     const DM_MERGE_DURATION_BONUS = 5;
     // 合并弹幕字号放大上限（倍）= 1.0 + MERGE_SCALE_BONUS_TABLE 末档增量，两处需保持一致
@@ -189,7 +194,8 @@
         let cleaned = name.replace(/^录制-\d+-/, '');
         cleaned = cleaned.replace(/^(\d{8}-\d{6})-\d+-/, '$1-');
         // danmakus 新版默认名：主播名_房间号_开播日期-开始时间_标题.xml -> 开播日期_标题.xml
-        // 主播名可能含下划线，取第一条“纯数字房间号 + 开播日期-时间”分段
+        // 主播名可能含下划线，取第一条“纯数字房间号 + 开播日期-时间”分段；开播时间默认不显示，
+        // 仅同一天多场重名时才由 buildDisplayNames 补上，避免平时命名变长
         cleaned = cleaned.replace(/^.+?_\d+_(20\d{6})-\d{6}_/, '$1_');
         cleaned = cleaned.replace(/^\d{13}_(\d{13})_/, (_, start) => {
             const d = new Date(Number(start));
@@ -199,11 +205,106 @@
         return cleaned;
     }
 
+    // 从 danmakus 文件名里取出开播日期与时间，供重名时追加时间用；取不到返回 null
+    // 新版：火羽ひのめ_2094031249_20261102-001204_【B限】ひの雑！！.xml -> { date: '20261102', time: '001204' }
+    // 旧版：下载时间_开播时间(13 位毫秒)_标题_房间号_主播名.xml，由开播时间戳换算成同上格式
+    function parseDanmakusStamp(name) {
+        const m = /^.+?_\d+_(20\d{6})-(\d{6})_/.exec(name || '');
+        if (m) return { date: m[1], time: m[2] };
+        const o = /^\d{13}_(\d{13})_/.exec(name || '');
+        if (o) {
+            const d = new Date(Number(o[1]));
+            if (isNaN(d.getTime())) return null;
+            const p = (n) => String(n).padStart(2, '0');
+            return {
+                date: String(d.getFullYear()).slice(2) + p(d.getMonth() + 1) + p(d.getDate()),
+                time: p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds())
+            };
+        }
+        return null;
+    }
+
+    // 计算历史列表的展示名：默认「日期_标题」，不追加开播时间；
+    // 只有同一天多场导致清洗后重名时，才从第二场（开播时间较晚的那场）开始追加 -HH；
+    // 同一小时也撞车再加长到 -HHMM / -HHMMSS，仍然重名才退回 (2)(3) 编号
+    function buildDisplayNames(list) {
+        const groups = new Map();   // 清洗后的基础名 -> 同名的历史条目
+        const stampOf = new Map();  // 原始文件名 -> 开播时间（可能为 null）
+        for (const h of list) {
+            const base = cleanFileName(h.name) || h.name;
+            if (!groups.has(base)) groups.set(base, []);
+            groups.get(base).push(h);
+            stampOf.set(h.name, parseDanmakusStamp(h.name));
+        }
+        // 先把所有基础名占住，追加出来的名字不能和别人的基础名撞
+        const used = new Set(groups.keys());
+        const names = new Map();
+        for (const [base, members] of groups) {
+            if (members.length === 1) {
+                names.set(members[0].name, base);
+                continue;
+            }
+            // 开播时间升序：第一场保留原名，后面的才追加时间；取不到时间的排在最后
+            const ordered = members.slice().sort((a, b) => {
+                const sa = stampOf.get(a.name);
+                const sb = stampOf.get(b.name);
+                if (sa && sb) return sa.time.localeCompare(sb.time);
+                return (sa ? 0 : 1) - (sb ? 0 : 1);
+            });
+            names.set(ordered[0].name, base);
+            // 组内后缀长度：能互相区分就取最短，三场以上挤在同一小时时自动加长到分钟/秒
+            let suffixLen = 2;
+            for (const len of [2, 4, 6]) {
+                suffixLen = len;
+                const seen = new Set();
+                let ok = true;
+                for (let i = 1; i < ordered.length; i++) {
+                    const st = stampOf.get(ordered[i].name);
+                    if (!st) continue;
+                    const key = st.time.slice(0, len);
+                    if (seen.has(key)) { ok = false; break; }
+                    seen.add(key);
+                }
+                if (ok) break;
+            }
+            let dup = 0;
+            for (let i = 1; i < ordered.length; i++) {
+                const h = ordered[i];
+                const stamp = stampOf.get(h.name);
+                let candidate = '';
+                // 只对能解析出开播时间的（danmakus 新/旧版命名）追加时间后缀
+                if (stamp && base.startsWith(stamp.date)) {
+                    // 组内已互不相同；若和别人的基础名撞车，再逐级加长
+                    for (const len of [2, 4, 6].filter(l => l >= suffixLen)) {
+                        const probe = base.slice(0, stamp.date.length) + '-' + stamp.time.slice(0, len)
+                            + base.slice(stamp.date.length);
+                        if (!used.has(probe)) { candidate = probe; break; }
+                    }
+                }
+                if (!candidate) {
+                    // 无时间戳或时间也撞车：退回「原名 (2)」式编号
+                    dup++;
+                    const ext = (/\.[^.]+$/.exec(base) || [''])[0];
+                    const stem = ext ? base.slice(0, -ext.length) : base;
+                    let n = dup + 1;
+                    do {
+                        candidate = stem + ' (' + n + ')' + ext;
+                        n++;
+                    } while (used.has(candidate));
+                }
+                used.add(candidate);
+                names.set(h.name, candidate);
+            }
+        }
+        return names;
+    }
+
     function addToHistory(fileName, content, offset) {
         if (!fileName) return;
         // 有 GM 存储时不限单文件大小，大文件也能进历史；无 GM 降级 localStorage 时才限制，避免撑爆其 5MB 配额
         if (!hasGMStorage() && content.length > FILE_HISTORY_MAX_SIZE) return;
-        // 先做同名去重：内容键以文件名生成，同名的新内容稍后直接覆盖写入，无需删除旧键
+        // 同名即同一条：文件名一样就覆盖更新（内容不同也覆盖），不新增历史条目
+        // 内容键以文件名生成，同名的新内容直接覆盖写入，无需先删旧键
         fileHistory = fileHistory.filter(h => h.name !== fileName);
         // GM 总量配额：超过安全线就从最旧的开始清理（内容键连带索引），总量恒低于故障线
         const totalSize = () => fileHistory.reduce((s, h) => s + Math.max(0, h.size || 0), 0);
@@ -254,13 +355,16 @@
             historyMenu.innerHTML = '<div class="ldx-history-item ldx-history-empty">暂无历史文件</div>';
             return;
         }
+        // 展示名每次按当前规则整体重算：旧缓存条目也能立刻用上新命名，
+        // 且同一天多场的重名判断依据整个历史列表，而不是单条
+        const displayNames = buildDisplayNames(fileHistory);
         fileHistory.forEach(h => {
             const item = document.createElement('div');
             item.className = 'ldx-history-item';
             item.title = h.name;
             const txt = document.createElement('span');
             txt.className = 'ldx-history-text';
-            txt.textContent = h.display || h.name;
+            txt.textContent = displayNames.get(h.name) || cleanFileName(h.name) || h.name;
             item.appendChild(txt);
             // 行尾删除：只清 TM 存储里的缓存记录，磁盘上的 XML 文件不受影响
             const del = document.createElement('span');
@@ -421,8 +525,59 @@
     }
 
     // ==================== 富弹幕（[图片URL] 与 [比心] 等直播表情码，渲染为内联图片） ====================
-    // 直播默认表情映射（[比心] -> CDN 小图），来源 bili-danmu-plus1 项目的静态表
-    const EMOTE_LIVE_MAP = {
+    // 直播表情分成两张互不相干的表，各自负责一种写法，查表入口不同、同名也不会互相覆盖：
+    //   ② EMOTE_NEW_PACK_MAP    —— 直播间热词 / 新表情 38 个（取自直播间表情面板 DOM），只认整段匹配，
+    //                               键就是裸表情名（"中奖喷雾"），和录播姬落盘、B 站下发一致，官方本就没有方括号
+    //   ① EMOTE_YELLOW_FACE_MAP —— 小黄脸 82 个（bili-danmu-plus1 静态表），只认 [表情名] 写法，
+    //                               键带方括号（"[比心]"），因为录播姬存下来的原文就是 "[比心]" 这种 token
+    // 为什么分开：录播姬把两类表情存成不同形态——小黄脸是 "[比心]" 这种带方括号的文本，
+    // 热词是点击即发送、不能和文字混排，落盘成裸名字 "中奖喷雾"。分开后 [赞] 用 ① 的图、
+    // 裸 "赞" 用 ② 的图，打字的 "加油"/"哇"/"再见" 也不会被误换成小黄脸。
+    const EMOTE_NEW_PACK_MAP = {
+        // ---------------- ② 直播间新版默认表情 / 热词包（38 个，顺序同面板；键为裸表情名） ----------------
+        "啊": 'https://i0.hdslb.com/bfs/live/cbf2746062242e77bdcb9eb08edbf9b151fe0c2e.png@130w.webp',
+        "冲鸭": 'https://i0.hdslb.com/bfs/live/dea7fbbc1c3d3c80f4c7b27263e13460f21874e4.png@130w.webp',
+        "upup": 'https://i0.hdslb.com/bfs/live/38d84a4cd2f40069202ee13bbdca5b23d29710fb.png@130w.webp',
+        "星星向龙": 'https://i0.hdslb.com/bfs/live/a69423be39b0f2a87dc74f2e44ead70de0eb0d4f.png@130w.webp',
+        "欧皇驾到": 'https://i0.hdslb.com/bfs/live/650399e68d0d93df4b3f9e95e7437e83be7fbb1a.png@130w.webp',
+        "这个好耶": 'https://i0.hdslb.com/bfs/live/2ce08b31618d3ad0d34877bf949ef0089a0438b7.png@130w.webp',
+        "泰裤辣": 'https://i0.hdslb.com/bfs/live/82c38fc930ae764b4c6215f544bf8e1dba73b51c.png@130w.webp',
+        "闪避技能": 'https://i0.hdslb.com/bfs/live/fa3febe6c62f3bcd042953141930d96fb8451e60.png@130w.webp',
+        "稳住能赢": 'https://i0.hdslb.com/bfs/live/b3495aaa935b045bfc2e1d52738ea7b124e0d552.png@130w.webp',
+        "中奖喷雾": 'https://i0.hdslb.com/bfs/live/c3cfa182d16564301d39e4c7e4c186dfb9fabf96.png@130w.webp',
+        "赞": 'https://i0.hdslb.com/bfs/live/bbd9045570d0c022a984c637e406cb0e1f208aa9.png@130w.webp',   // 与 ① 同名：本表只用于整段匹配
+        "妙啊": 'https://i0.hdslb.com/bfs/live/7b7a2567ad1520f962ee226df777eaf3ca368fbc.png@130w.webp',
+        "有点东西": 'https://i0.hdslb.com/bfs/live/39e518474a3673c35245bf6ef8ebfff2c003fdc3.png@130w.webp',
+        "很有精神": 'https://i0.hdslb.com/bfs/live/e91cbe30b2db1e624bd964ad1f949661501f42f8.png@130w.webp',
+        "泪目": 'https://i0.hdslb.com/bfs/live/aa93b9af7ba03b50df23b64e9afd0d271955cd71.png@130w.webp',
+        "赢麻了": 'https://i0.hdslb.com/bfs/live/1d4c71243548a1241f422e90cd8ba2b75c282f6b.png@130w.webp',
+        "钝角": 'https://i0.hdslb.com/bfs/live/38cf68c25d9ff5d364468a062fc79571db942ff3.png@130w.webp',
+        "干杯": 'https://i0.hdslb.com/bfs/live/8fedede4028a72e71dae31270eedff5f706f7d18.png@130w.webp',
+        "2333": 'https://i0.hdslb.com/bfs/live/a98e35996545509188fe4d24bd1a56518ea5af48.png@130w.webp',
+        "打call": 'https://i0.hdslb.com/bfs/live/fa1eb4dce3ad198bb8650499830560886ce1116c.png@130w.webp',
+        "多谢款待": 'https://i0.hdslb.com/bfs/live/4609dad97c0dfa61f8da0b52ab6fff98e0cf1e58.png@130w.webp',
+        "awsl": 'https://i0.hdslb.com/bfs/live/328e93ce9304090f4035e3aa7ef031d015bbc915.png@130w.webp',
+        "鸡汤来咯": 'https://i0.hdslb.com/bfs/live/b371151503978177b237afb85185b0f5431d0106.png@130w.webp',
+        "雀食": 'https://i0.hdslb.com/bfs/live/7251dc7df587388a3933743bf38394d12a922cd7.png@130w.webp',
+        "禁止套娃": 'https://i0.hdslb.com/bfs/live/6a644577437d0bd8a314990dd8ccbec0f3b30c92.png@130w.webp',
+        "暗中观察": 'https://i0.hdslb.com/bfs/live/18af5576a4582535a3c828c3ae46a7855d9c6070.png@130w.webp',
+        "保熟吗": 'https://i0.hdslb.com/bfs/live/0e28444c8e2faef3169e98e1a41c487144d877d4.png@130w.webp',
+        "比心": 'https://i0.hdslb.com/bfs/live/1ba5126b10e5efe3e4e29509d033a37f128beab2.png@130w.webp',   // 与 ① 同名：本表只用于整段匹配
+        "咸鱼翻身": 'https://i0.hdslb.com/bfs/live/7db4188c050f55ec59a1629fbc5a53661e4ba780.png@130w.webp',
+        "mua": 'https://i0.hdslb.com/bfs/live/08f1aebaa4d9c170aa79cbafe521ef0891bdf2b5.png@130w.webp',
+        "来了来了": 'https://i0.hdslb.com/bfs/live/61e790813c51eab55ebe0699df1e9834c90b68ba.png@130w.webp',
+        "贴贴": 'https://i0.hdslb.com/bfs/live/88b49dac03bfd5d4cb49672956f78beb2ebd0d0b.png@130w.webp',
+        "牛牛牛": 'https://i0.hdslb.com/bfs/live/343f7f7e87fa8a07df63f9cba6b776196d9066f0.png@130w.webp',
+        "颠个勺": 'https://i0.hdslb.com/bfs/live/625989e78079e3dc38d75cb9ac392fe8c1aa4a75.png@130w.webp',
+        "好家伙": 'https://i0.hdslb.com/bfs/live/c2650bf9bbc79b682a4b67b24df067fdd3e5e9ca.png@130w.webp',
+        "下次一定": 'https://i0.hdslb.com/bfs/live/cc2652cef69b22117f1911391567bd2957f27e08.png@130w.webp',
+        "不上Ban": 'https://i0.hdslb.com/bfs/live/eff44c1fc03311573e8817ca8010aca72404f65c.png@130w.webp',
+        "上热榜": 'https://i0.hdslb.com/bfs/live/83d5b9cdaaa820c2756c013031d34dac1fd4156b.png@130w.webp'
+    };
+
+    // ①（小黄脸）82 个：只在 [表情名] 写法里查，与上面的热词表互不影响；键带方括号是因为匹配时直接拿原文 token
+    const EMOTE_YELLOW_FACE_MAP = {
+        // ---------------- ① 小黄脸（旧默认表情包，82 个） ----------------
         "[藏狐]": 'https://i0.hdslb.com/bfs/live/05ef7849e7313e9c32887df922613a7c1ad27f12.png@130w.webp',
         "[妙]": 'https://i0.hdslb.com/bfs/live/08f735d950a0fba267dda140673c9ab2edf6410d.png@130w.webp',
         "[三星堆]": 'https://i0.hdslb.com/bfs/live/0a1ab3f0f2f2e29de35c702ac1ecfec7f90e325d.png@130w.webp',
@@ -506,6 +661,7 @@
         "[瓜子]": 'https://i0.hdslb.com/bfs/live/fd35718ac5a278fd05fe5287ebd41de40a59259d.png@130w.webp',
         "[吃瓜]": 'https://i0.hdslb.com/bfs/live/ffb53c252b085d042173379ac724694ce3196194.png@130w.webp'
     };
+
     // 只匹配方括号候选内容；具体是表情码还是图片 URL 交给 Map / URL 校验
     const RICH_TOKEN_RE = /\[([^\[\]\r\n]{1,512})\]/g;
     const RICH_IMAGE_HOST_RE = /^i[0-3]\.hdslb\.com$/i;
@@ -513,7 +669,7 @@
     const failedRichImages = new Set();
 
     function resolveRichImage(token, inner) {
-        const mapped = EMOTE_LIVE_MAP[token];
+        const mapped = EMOTE_YELLOW_FACE_MAP[token];
         if (mapped) return mapped;
         // URL 解析本身有成本，普通 [文字] 不进入该分支
         if (!/^https?:\/\//i.test(inner)) return '';
@@ -529,8 +685,39 @@
     }
 
     // 富弹幕构建：把 [图片URL] / [表情码] 替换为内联 img，其余文本保持纯文本节点（不用 innerHTML 防注入）。
-    // 无富内容返回 null（调用方退回纯文本）
-    function buildRichDanmaku(text) {
+    // 无富内容返回 null（调用方退回纯文本）。
+    // opts.lazy = true 时给图片加 loading="lazy"：搜索结果一次渲染几百条时按需请求 CDN，
+    // 避免几百张表情图同时开抢连接把列表拖卡（弹幕浮层不能懒加载，图要立刻可见）
+    function buildRichImg(srcUrl, raw, lazy) {
+        const img = document.createElement('img');
+        img.className = 'ldx-dm-img';
+        img.alt = raw;
+        img.decoding = 'async';
+        if (lazy) img.loading = 'lazy';
+        img.addEventListener('error', () => {
+            failedRichImages.add(srcUrl);
+            img.replaceWith(document.createTextNode(raw));
+        }, { once: true });
+        img.src = srcUrl;   // 先绑事件再触发加载
+        return img;
+    }
+
+    function buildRichDanmaku(text, opts) {
+        if (typeof text !== 'string' || !text) return null;
+        const lazy = !!(opts && opts.lazy);
+        // 直播热词表情：整条弹幕就是表情名（无方括号），整段精确匹配才出图；
+        // 只查 ② 那张表，小黄脸名字（加油/哇/再见…）打字发送时保持原样
+        if (DM_EXACT_EMOTE_MATCH) {
+            const name = text.trim();
+            if (name && name.indexOf('[') === -1) {
+                const soleUrl = EMOTE_NEW_PACK_MAP[name];
+                if (soleUrl && !failedRichImages.has(soleUrl)) {
+                    const frag = document.createDocumentFragment();
+                    frag.appendChild(buildRichImg(soleUrl, name, lazy));
+                    return frag;
+                }
+            }
+        }
         // 快速预判: 绝大多数普通弹幕不含 "[", 一次字符串搜索替代整场正则扫描
         if (!text.includes('[')) return null;
         RICH_TOKEN_RE.lastIndex = 0;
@@ -538,20 +725,12 @@
         const frag = document.createDocumentFragment();
         while ((mm = RICH_TOKEN_RE.exec(text))) {
             const raw = mm[0];
-            const srcUrl = resolveRichImage(raw, mm[1]);
+            // 方括号内可能带空白（[ https://... ]），查表情码用原 token，解析 URL 用 trim 后的内容
+            const srcUrl = resolveRichImage(raw, mm[1].trim());
             // 无法识别或已失败的图片保留原始方括号文本，不中断其他富内容
             if (!srcUrl || failedRichImages.has(srcUrl)) continue;
             if (mm.index > last) frag.appendChild(document.createTextNode(text.slice(last, mm.index)));
-            const img = document.createElement('img');
-            img.className = 'ldx-dm-img';
-            img.alt = raw;
-            img.decoding = 'async';
-            img.addEventListener('error', () => {
-                failedRichImages.add(srcUrl);
-                img.replaceWith(document.createTextNode(raw));
-            }, { once: true });
-            img.src = srcUrl;   // 先绑事件再触发加载
-            frag.appendChild(img);
+            frag.appendChild(buildRichImg(srcUrl, raw, lazy));
             has = true;
             last = mm.index + raw.length;
         }
@@ -1046,8 +1225,12 @@
 
         /* ---------- 搜索 ---------- */
         .ldx-search-row { display: flex; gap: 6px; }
+        /* 结果列表吃满弹窗剩余空间：弹窗拖大列表跟着变高，内容少时不占多余高度；
+           min-height 是弹窗拖得过小时的滚动下限，超出由 box 自身 overflow 兜底 */
+        #ldx-search-panel .ldx-modal-box { display: flex; flex-direction: column; }
         .ldx-search-results {
-            max-height: 240px;
+            flex: 1 1 auto;
+            min-height: 160px;
             overflow-y: auto;
             margin-top: 7px;
             border-radius: 9px;
@@ -1070,6 +1253,12 @@
         }
         .ldx-search-item:last-child { border-bottom: none; }
         .ldx-search-item:hover { background: rgba(251, 114, 153, 0.16); color: #fff; }
+        /* 搜索结果里的表情 / 图片弹幕：沿用浮层的 .ldx-dm-img，列表字号 12px 下略放大并居中对齐行内文字 */
+        .ldx-search-item .ldx-dm-img {
+            height: 1.5em;
+            max-width: 4.5em;
+            vertical-align: -0.4em;
+        }
         .ldx-align-btn {
             display: inline-block;
             margin-right: 6px;
@@ -1113,6 +1302,12 @@
         }
         .ldx-align-toggle:hover { color: #cdd1e0; }
         .ldx-align-toggle input { accent-color: #fb7299; margin: 0; cursor: pointer; }
+        /* 高亮总开关：不用 label 包裹，点文字不切换，只有勾选框本身能切换（防误触）；
+           flex 行保持整行宽度，视觉上仍和别处开关对齐 */
+        .ldx-hl-toggle { cursor: default; }
+        .ldx-hl-toggle input { width: 13px; height: 13px; }
+        /* 高亮被关闭时把 ★ 按钮压暗，避免关了却看不出来 */
+        #ldx-hl-btn.ldx-hl-off { color: #6b7083; opacity: 0.55; }
         /* ---------- 高亮用户弹窗（非模态：无遮罩，容器点击穿透，不挡视频播放） ----------
            挂在 body 下（脱离主容器 stacking context 以盖住视频），隐藏规则与字体需独立声明 */
         .ldx-modal.hidden { display: none !important; }
@@ -1202,6 +1397,8 @@
         }
         .ldx-hl-row:last-child { border-bottom: none; }
         .ldx-hl-row .uid { color: #8a8fa3; font-family: Consolas, monospace; font-size: 11px; }
+        .ldx-hl-row a.uid { text-decoration: none; }
+        .ldx-hl-row a.uid:hover { color: #fb7299; text-decoration: underline; }
         .ldx-hl-row .name { flex: 1; color: #e8eaf0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .ldx-hl-del {
             cursor: pointer;
@@ -2169,6 +2366,7 @@
         if (typeof pairedOffset === 'number' && !isNaN(pairedOffset)) {
             loadOffset = pairedOffset;
         } else {
+            // 同名导入视为同一个 xml：沿用旧条目的偏移，避免把已对齐好的 offset 重置
             const sameName = fileName && fileHistory.find(h => h.name === fileName);
             if (sameName && typeof sameName.offset === 'number' && !isNaN(sameName.offset)) {
                 loadOffset = sameName.offset;
@@ -2341,13 +2539,18 @@
                 const count = item.getAttribute('giftcount') || "1";
                 // 礼物价格统一换算成元：录制源单位不统一——danmakus.com 金瓜子按千分之一元、银瓜子为免费货币、
                 // 上舰类已是元；录播姬则从 raw（B站GIFT报文）取，price 为千分之一元、coin_type=silver 为免费
+                // priceKnown 区分"源文件明确写了 0（免费礼物）"与"源文件根本没写金额"：
+                // 录播姬自录 XML 的 <gift> 只有 giftname/giftcount，没有 price/cointype，不能当成 0 元展示
                 let priceYuan = 0;
+                let priceKnown = false;
                 if (rawData && isFinite(rawData.price)) {
                     priceYuan = rawData.coin_type === 'silver' ? 0 : rawData.price / 1000;
+                    priceKnown = true;
                 } else {
                     const cointype = item.getAttribute('cointype') || '';
                     const p = parseFloat(item.getAttribute('price'));
                     if (isFinite(p)) {
+                        priceKnown = true;
                         if (cointype === '金瓜子') priceYuan = p / 1000;
                         else if (cointype === '银瓜子') priceYuan = 0;
                         else {
@@ -2372,7 +2575,7 @@
                     const gText = gCount > 1 ? `${guardText(gLevel)} x ${gCount}` : guardText(gLevel);
                     const gUid = item.getAttribute('uid') || String(rawData?.sender_uinfo?.uid || "");
                     danmakuList.push({
-                        time, text: gText, type: 'guard', level: gLevel, user, uid: gUid, priceYuan,
+                        time, text: gText, type: 'guard', level: gLevel, user, uid: gUid, priceYuan, priceKnown,
                         absTs: specialAbsTs(time), shown: false
                     });
                 } else if (!isNaN(time)) {
@@ -2380,7 +2583,7 @@
                     // 数量为 1 时不追加个数后缀
                     const giftText = countNum > 1 ? `${giftName} x ${countNum}` : giftName;
                     danmakuList.push({
-                        time, text: giftText, type: 'gift', user, uid, count, priceYuan,
+                        time, text: giftText, type: 'gift', user, uid, count, priceYuan, priceKnown,
                         absTs: specialAbsTs(time), shown: false
                     });// 投喂了
                 }
@@ -2397,12 +2600,15 @@
                 // 上舰金额必须取节点真实价格（连续包月 138 与月购 198 同级不同价，不能按等级推算）：
                 // raw 报文 price 为金瓜子（千分之一元），XML 属性按 cointype 区分——金瓜子/1000，银瓜子免费，其余（舰长等）已是元
                 let priceYuan = 0;
+                let priceKnown = false;   // 与 <gift> 同理：自录 XML 的 <guard> 不带 price，缺失时不能当作免费
                 if (rawData && isFinite(rawData.price)) {
                     priceYuan = rawData.coin_type === 'silver' ? 0 : rawData.price / 1000;
+                    priceKnown = true;
                 } else {
                     const cointype = item.getAttribute('cointype') || '';
                     const p = parseFloat(item.getAttribute('price'));
                     if (isFinite(p)) {
+                        priceKnown = true;
                         if (cointype === '金瓜子') priceYuan = p / 1000;
                         else if (cointype === '银瓜子') priceYuan = 0;
                         else {
@@ -2425,7 +2631,7 @@
                 const gUid = item.getAttribute('uid') || String(rawData?.uid || "");
                 if (!isNaN(time)) {
                     danmakuList.push({
-                        time, text: gText, type: 'guard', level: lv, user, uid: gUid, priceYuan,
+                        time, text: gText, type: 'guard', level: lv, user, uid: gUid, priceYuan, priceKnown,
                         absTs: specialAbsTs(time), shown: false
                     });
                 }
@@ -2741,7 +2947,8 @@
                 displayText = `[👻SC${cfgShowSCPrice ? ` ￥${dm.price}` : ''}] ${displayText}`;
                 break;
             case 'gift':
-                displayText = `[🎁礼物${cfgShowGiftPrice ? ` ￥${dm.priceYuan}` : ''}] ${displayText}`;
+                // 源文件没写金额（如自录 XML）时整段省略，避免把"未知"显示成 ￥0
+                displayText = `[🎁礼物${cfgShowGiftPrice && dm.priceKnown !== false ? ` ￥${dm.priceYuan}` : ''}] ${displayText}`;
                 break;
             case 'guard': {
                 // 前缀固定为"图标+上舰"，正文文案由 guardText 维护（guardIcon 的 emoji 是 showDanmaku 样式分支的判断依据）
@@ -3270,9 +3477,9 @@
                     <div class="ldx-modal-box">
                         <div class="ldx-modal-title">高亮用户<span id="ldx-hl-close" class="ldx-modal-close" title="关闭">×</span></div>
                         <div class="ldx-modal-hint">输入用户 UID 添加，自动从已载入弹幕关联昵称，此后无需维护；播放时强制显示昵称并以玫红高亮，无 UID 的录制源不参与匹配</div>
-                        <label class="ldx-align-toggle" style="margin-bottom:8px" title="关闭后不匹配高亮用户，已添加的列表保留；重新开启立即生效">
-                            <input type="checkbox" id="ldx-hl-enabled">启用高亮
-                        </label>
+                        <div class="ldx-align-toggle ldx-hl-toggle" style="margin-bottom:8px" title="关闭后不匹配高亮用户，已添加的列表保留；重新开启立即生效">
+                            <input type="checkbox" id="ldx-hl-enabled" aria-label="启用高亮">启用高亮
+                        </div>
                         <div class="ldx-hl-sortbar">
                             <span>排序</span>
                             <button class="ldx-sort-chip" data-sort="added">添加时间</button>
@@ -3478,7 +3685,7 @@
                 // 特殊弹幕在结果中加类型徽标便于区分，普通弹幕不显示
                 const badgeFor = (dm) => {
                     if (dm.type === 'sc') return ['sc', `SC${cfgShowSCPrice ? ` ￥${dm.price}` : ''}`];
-                    if (dm.type === 'gift') return ['gift', `礼物${cfgShowGiftPrice ? ` ￥${dm.priceYuan}` : ''}`];
+                    if (dm.type === 'gift') return ['gift', `礼物${cfgShowGiftPrice && dm.priceKnown !== false ? ` ￥${dm.priceYuan}` : ''}`];
                     if (dm.type === 'guard') {
                         const lv = dm.level || guardLevel(dm.text);
                         const priceTag = cfgShowGuardPrice && dm.priceYuan > 0 ? ` ￥${dm.priceYuan}` : '';
@@ -3521,7 +3728,16 @@
                         user.title = uidOk ? `点击复制 UID: ${dm.uid}` : '该弹幕无有效 UID';
                         div.appendChild(user);
                     }
-                    div.appendChild(document.createTextNode(dm.text));
+                    // 富弹幕：与弹幕浮层同源解析 [图片URL] / [表情码] 为内联图（含失败图缓存），
+                    // 无富内容退回纯文本；图片走懒加载，单条解析异常也不拖垮整批结果
+                    let rich = null;
+                    try {
+                        rich = buildRichDanmaku(dm.text, { lazy: true });
+                    } catch (err) {
+                        rich = null;
+                    }
+                    if (rich) div.appendChild(rich);
+                    else div.appendChild(document.createTextNode(dm.text));
                     frag.appendChild(div);
                 });
                 searchResults.appendChild(frag);
@@ -3763,6 +3979,14 @@
             const hlList = document.getElementById('ldx-hl-list');
             const hlInput = document.getElementById('ldx-hl-input');
             const hlAddBtn = document.getElementById('ldx-hl-add');
+            // ★ 按钮反映总开关状态：关闭时压暗并在提示里说明，避免“关了看不出来”
+            const HL_BTN_TITLE = '高亮用户管理：按 UID 高亮指定用户';
+            function updateHlBtnState() {
+                hlBtn.classList.toggle('ldx-hl-off', !cfgHlEnabled);
+                hlBtn.title = cfgHlEnabled
+                    ? HL_BTN_TITLE
+                    : HL_BTN_TITLE + '（高亮已关闭，在面板里勾选“启用高亮”恢复）';
+            }
             // 浮窗移出主容器、直接挂到 body：脱离容器的 stacking context（其 z-index 仅 10），
             // 否则浮窗内部 z-index 再高也只在容器上下文内比较，会被视频区域整体压住
             document.body.appendChild(searchPanel);
@@ -3792,8 +4016,16 @@
                     row.className = 'ldx-hl-row';
                     row.title = '最近出现: ' + fmtT(u.lastSeen) + '  ·  添加: ' + fmtT(u.added)
                         + (u.lastText ? '  ·  最后发言: ' + u.lastText : '');
-                    const uid = document.createElement('span');
+                    // 有效 uid（正数）渲染为 danmakus.com 用户查询页链接，新标签打开；"-1"/"0" 占位值保持纯文本
+                    const uidOk = Number(u.uid) > 0;
+                    const uid = document.createElement(uidOk ? 'a' : 'span');
                     uid.className = 'uid';
+                    if (uidOk) {
+                        uid.href = 'https://danmakus.com/user/' + u.uid;
+                        uid.target = '_blank';
+                        uid.rel = 'noopener';
+                        uid.title = '在 danmakus.com 查询该用户（新标签打开）';
+                    }
                     uid.textContent = u.uid;
                     const name = document.createElement('span');
                     name.className = 'name';
@@ -3827,9 +4059,11 @@
             document.getElementById('ldx-hl-close').addEventListener('click', () => hlModal.classList.add('hidden'));
             const hlEnabledCheck = document.getElementById('ldx-hl-enabled');
             hlEnabledCheck.checked = cfgHlEnabled;
+            updateHlBtnState();
             hlEnabledCheck.addEventListener('change', (e) => {
                 cfgHlEnabled = e.target.checked;
                 saveLiveCfg();
+                updateHlBtnState();
                 // 立即生效：清屏重排，屏上已显示的高亮弹幕按新状态重建
                 triggerFullDanmakuReset(videoElement.currentTime);
             });

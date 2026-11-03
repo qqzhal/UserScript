@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         B站弹幕广告跳过助手
-// @version      1.6.3
+// @version      1.6.4
 // @description  基于弹幕提示自动跳过片头/广告/赞助段落 — 纯本地解析，无AI依赖，防日期混淆，支持重复验证，页面广告段检测
 // @author       Reasonix
 // @license      MIT
@@ -17,7 +17,7 @@
 'use strict';
 
 /* 版本号 */
-const SCRIPT_VERSION = '1.6.3';
+const SCRIPT_VERSION = '1.6.4';
 const SCRIPT_BUILD = 4;
 
 /* ===================================================================
@@ -2387,6 +2387,23 @@ function runJumpCycle() {
     }
 }
 
+/** 用户在倒计时中主动操作（按任意键）时取消本次跳转 */
+function cancelActiveCountdown(reason) {
+    if (!currentTarget) return;
+    currentTarget = null;
+    decisionTimeLeft = 0;
+    decisionStartTime = 0;
+    decisionTotalWait = 0;
+    if (activeToast) {
+        const toast = activeToast;
+        activeToast = null;
+        toast.innerText = `⛔ ${reason}`;
+        setTimeout(() => toast.remove(), 1200);
+    }
+    if (isExpanded) updateLogUI();
+    console.log(`[跳过] ${reason}`);
+}
+
 /* ===================================================================
    日志 UI
    =================================================================== */
@@ -2957,6 +2974,12 @@ function start() {
         // 页面广告段检测
         if (currentVideo && isEnabled) checkAdSegments();
     }, 200);
+
+    // 倒计时期间按任意键（含 ←/→ 快进快退、空格、功能键、组合键）→ 视为用户主动干预，取消本次跳转
+    window.addEventListener('keydown', (e) => {
+        if (!currentTarget) return; // 仅倒计时进行中生效，其余时间不做任何事
+        cancelActiveCountdown('已取消跳转（检测到按键操作）');
+    }, true);
 
     // 响应窗口尺寸变化
     window.addEventListener('resize', () => {
